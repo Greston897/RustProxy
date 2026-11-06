@@ -168,17 +168,17 @@ impl Wtr {
 /// Распарсить serverbound пакет из сырых байт конкретной версии в IR.
 pub fn parse_serverbound(id: i32, data: &[u8], version: &ProtocolVersion) -> Result<PacketIR> {
     match id {
-        v if id == version.play_chat_message_id => parse_chat_message(data),
-        v if id == version.play_player_position_id => parse_player_position(data),
-        v if id == version.play_player_look_id => parse_player_look(data),
-        v if id == version.play_player_position_and_look_id => {
+        _ if id == version.play_chat_message_id => parse_chat_message(data),
+        _ if id == version.play_player_position_id => parse_player_position(data),
+        _ if id == version.play_player_look_id => parse_player_look(data),
+        _ if id == version.play_player_position_and_look_id => {
             parse_player_position_and_look(data)
         }
-        v if id == version.play_player_on_ground_id => parse_player_on_ground(data),
-        v if id == version.play_keep_alive_id => parse_keep_alive(data),
-        v if id == version.play_teleport_confirm_id => parse_teleport_confirm(data),
-        v if id == version.play_plugin_message_id => parse_plugin_message(data),
-        v if id == version.play_custom_payload_id => parse_custom_payload(data),
+        _ if id == version.play_player_on_ground_id => parse_player_on_ground(data),
+        _ if id == version.play_keep_alive_id => parse_keep_alive(data),
+        _ if id == version.play_teleport_confirm_id => parse_teleport_confirm(data),
+        _ if id == version.play_plugin_message_id => parse_plugin_message(data),
+        _ if id == version.play_custom_payload_id => parse_custom_payload(data),
         _ => Ok(PacketIR::Raw { id, data: data.to_vec() }),
     }
 }

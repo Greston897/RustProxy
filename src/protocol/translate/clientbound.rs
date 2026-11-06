@@ -175,18 +175,18 @@ impl Wtr {
 /// Распарсить clientbound пакет из сырых байт конкретной версии в IR.
 pub fn parse_clientbound(id: i32, data: &[u8], version: &ProtocolVersion) -> Result<PacketIR> {
     match id {
-        v if id == version.play_join_game_id => parse_join_game(data, version),
-        v if id == version.play_spawn_position_id => parse_spawn_position(data),
-        v if id == version.play_player_position_and_look_cb_id => {
+        _ if id == version.play_join_game_id => parse_join_game(data, version),
+        _ if id == version.play_spawn_position_id => parse_spawn_position(data),
+        _ if id == version.play_player_position_and_look_cb_id => {
             parse_player_position_and_look_cb(data)
         }
-        v if id == version.play_chat_message_cb_id => parse_chat_message_cb(data),
-        v if id == version.play_disconnect_id => parse_disconnect(data),
-        v if id == version.play_keep_alive_cb_id => parse_keep_alive_cb(data),
-        v if id == version.play_entity_metadata_id => parse_entity_metadata(data),
-        v if id == version.play_entity_velocity_id => parse_entity_velocity(data),
-        v if id == version.play_entity_position_id => parse_entity_position(data),
-        v if id == version.play_entity_look_id => parse_entity_look(data),
+        _ if id == version.play_chat_message_cb_id => parse_chat_message_cb(data),
+        _ if id == version.play_disconnect_id => parse_disconnect(data),
+        _ if id == version.play_keep_alive_cb_id => parse_keep_alive_cb(data),
+        _ if id == version.play_entity_metadata_id => parse_entity_metadata(data),
+        _ if id == version.play_entity_velocity_id => parse_entity_velocity(data),
+        _ if id == version.play_entity_position_id => parse_entity_position(data),
+        _ if id == version.play_entity_look_id => parse_entity_look(data),
         _ if id == version.play_entity_position_and_look_id => {
             parse_entity_position_and_look(data)
         }
