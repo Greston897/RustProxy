@@ -406,9 +406,8 @@ impl Default for TranslationsSection {
 
 /// Подставить значения в шаблон перевода ({player}, {target} и т.д.)
 
-
 impl ProxyConfig {
-pub fn t(&self, key: &str, replacements: &[(&str, &str)]) -> String {
+    pub fn t(&self, key: &str, replacements: &[(&str, &str)]) -> String {
     let template = match key {
         "auth_required" => &self.translations.auth_required,
         "welcome" => &self.translations.welcome,
