@@ -1,0 +1,192 @@
+# ════════════════════════════════════════════════════════════════════════════════
+# RustProxy — конфигурация
+# ════════════════════════════════════════════════════════════════════════════════
+#
+# Поддержка цветов в строках:
+#   &0-&9, &a-&f  — классические цвета Minecraft
+#   &l, &m, &n, &o, &r — форматирование (жирный, зачёркнутый, подчёркнутый, курсив, сброс)
+#   &#RRGGBB     — HEX цвет (например, &#FF0000 для красного)
+#   \n           — перенос строки (multiline)
+#
+# Пример multiline HEX-сообщения:
+#   msg = "&b&lRustProxy &f»\n&eДобро пожаловать, &6{player}!\n&#00FF00Сервер работает."
+
+[proxy]
+name = "RustProxy"
+motd = "&b&lRustProxy &f» Ideal Top Proxy"
+online_mode = false
+max_players = 2000
+compression_threshold = 256
+read_timeout_secs = 30
+write_timeout_secs = 30
+idle_timeout_secs = 300
+default_server = "lobby"
+fallback_server = "lobby"
+
+[network]
+bind = "0.0.0.0:25565"
+worker_threads = 0   # 0 = все ядра CPU
+tcp_nodelay = true
+
+[status]
+motd = "&bRustProxy &7| &e1.16.5 → 26.3"
+max_players = 2000
+ping_interval_secs = 30
+
+[[servers]]
+name = "lobby"
+address = "127.0.0.1:25566"
+enabled = true
+
+[[servers]]
+name = "survival"
+address = "127.0.0.1:25567"
+enabled = true
+
+[[servers]]
+name = "fallback"
+address = "127.0.0.1:25568"
+enabled = true
+
+[auth]
+mode = "offline"   # offline | online | microsoft
+
+[auth_local]
+enabled = true
+cache_ttl_secs = 3600
+
+[captcha]
+enabled = false
+ttl_secs = 300
+max_attempts = 3
+exemption_hours = 4
+
+[tfa]
+enabled = false
+bot_token = "YOUR_BOT_TOKEN_HERE"
+
+[ddos]
+enabled = true
+max_nbt_depth = 16
+max_nbt_tag_size = 1048576
+max_nbt_list_size = 10000
+nbt_packets_per_sec = 50
+max_connections_per_sec_per_ip = 100
+ban_duration_secs = 3600
+
+[fallback]
+enabled = true
+fallback_server = "lobby"
+auto_return = true
+health_check_interval_secs = 15
+kick_message = "&b&lRustProxy &f» &eСервер &c{server} &eушёл оффлайн. &fПерекидываем на &a{fallback} &bбез дисконнекта."
+
+[monitor]
+enabled = true
+interval_secs = 30
+
+# ════════════════════════════════════════════════════════════════════════════════
+# [translations] — все текстовые сообщения прокси (поддерживают HEX & multiline)
+# ════════════════════════════════════════════════════════════════════════════════
+[translations]
+
+# --- Авторизация ---
+auth_required = "&c&lТребуется авторизация &f» &fВведите &a/l <пароль> &fили &a/reg <пароль>\n&7Добро пожаловать, &e{player}\n&7После авторизации используйте &a/hub &fдля перехода на лобби."
+welcome = "&a&lАвторизация &f» &fДобро пожаловать, &e{player}\n&7Используйте &a/server <имя> &fили &a/hub &fдля перехода на сервер.\n&fСписок серверов: &a/serverlist"
+registered = "&a&lРегистрация &f» &fАккаунт создан. Теперь &a/login <пароль>"
+login_success = "&a&lАвторизация &f» &fДобро пожаловать, &e{player}"
+logged_out = "&c&lВы вышли из аккаунта &f» &fВведите &a/login <пароль> &fдля входа."
+account_not_found = "&cАккаунт не найден. Зарегистрируйтесь: &f/reg <пароль>"
+wrong_password = "&cНеверный пароль."
+account_deleted = "&aАккаунт &f{target} &aудалён из базы аутентификации."
+password_changed = "&aПароль для &f{target} &aизменён."
+password_too_short = "&cПароль должен быть не короче 4 символов."
+username_invalid = "&cНик может содержать только буквы, цифры, подчёркивание и дефис (3-16 символов)."
+
+# --- TFA (2FA) ---
+tfa_on = "&a&l2FA &f» &fПодтверждение входа включено."
+tfa_off = "&c&l2FA &f» &fПодтверждение входа отключено (привязка остаётся)."
+tfa_link_first = "&cСначала привяжите Telegram: &f/link"
+tfa_status = "&7TFA: &fПривязано: {linked}\n&72FA: &f{enabled}"
+tfa_help = "&7TFA команды: &f/tfa on &7| &f/tfa off &7| &f/tfa status"
+tfa_2fa_required = "&cТребуется подтверждение через Telegram (2FA)."
+tfa_confirm_sent = "&b&l2FA &f» &fЗапрос подтверждения отправлен в Telegram. Ответьте &a/da &fили &c/net &fв боте."
+tfa_confirmed = "&a&lВход подтверждён &f» &fДобро пожаловать, &e{player}"
+tfa_denied = "&cВход отклонён через Telegram."
+tfa_not_linked = "&c2FA включён, но Telegram не привязан. Обратитесь к администрации."
+
+# --- Telegram /link ---
+link_code_sent = "&a&lTelegram &f» &fКод привязки отправлен в бота. Введите &f/link <код>"
+link_success = "&a&lTelegram &f» &fПривязан к чату &a{chat_id}"
+link_not_linked = "&cTelegram не привязан к аккаунту. Обратитесь к администрации."
+link_invalid_code = "&cНеверный код привязки. Запросите новый через /link."
+link_expired = "&cКод привязки истёк. Запросите новый через /link."
+link_wrong_account = "&cКод не принадлежит этому аккаунту."
+link_tg_already_used = "&cЭтот Telegram уже привязан к другому аккаунту."
+
+# --- CAPTCHA ---
+captcha_passed = "&a&lCAPTCHA &f» &fПройдено! Освобождение на 4 часа."
+captcha_wrong = "&cНеверный код капчи. Попробуйте ещё раз."
+captcha_usage = "&cИспользование: &f/captcha <код>"
+captcha_too_many = "&cСлишком много неудачных попыток. IP заблокирован."
+captcha_expired = "&cКапча истекла. Перезайдите на сервер."
+captcha_no_session = "&cНет активной сессии капчи."
+captcha_ip_banned = "&cIP временно заблокирован из-за неудачных попыток капчи."
+
+# --- BungeeCord команды ---
+server_switch = "&aПереключился на сервер &f{server}"
+server_list_header = "&7=== &bСерверы &7==="
+server_list_footer = "\n&fНажмите &a[connect] &fчтобы подключиться."
+server_list_line = "{status} {name} &f{players}/{max} &7{motd}"
+server_online = "&a●"
+server_offline = "&c●"
+player_not_found = "&cИгрок &f{player} &cне найден на серверах."
+player_found = "&7Игрок &f{player} &7на сервере: &a{servers}"
+proxy_stats = "&7Прокси: &f{count} &7игроков | &7TPS: &a{tps} &7| &7Серверов: &a{online}/{total}"
+unknown_command = "&cНеизвестная команда. &f/help"
+no_permission = "&cНет прав на эту команду."
+
+# --- Админ ---
+alert_sent = "&aАлерт отправлен всем игрокам."
+alert_usage = "&cИспользование: &f/alert <сообщение>"
+perm_usage = "&7Использование: &f/perm user <ник> <право> &7| &f/perm user <ник> -<право>"
+perm_granted = "&aПраво &f{perm} &aвыдано &f{nick}&a."
+perm_revoked = "&cПраво &f{perm} &cзабрано у &f{nick}&c."
+perm_unknown = "&cНеизвестное право. &f/help"
+auth_usage = "&7Использование: &f/auth player <ник> delete &7— удалить аккаунт\n&7&f/auth player <ник> password <пароль> &7— сменить пароль"
+
+# --- Help ---
+help_header = "&7=== &bRustProxy &7Команды &7==="
+help_cmd_login = "&f/l <пароль> &7— вход"
+help_cmd_register = "&f/reg <пароль> &7— регистрация"
+help_cmd_logout = "&f/logout &7— выход из аккаунта"
+help_cmd_link = "&f/link &7— привязать Telegram"
+help_cmd_tfa = "&f/tfa <on|off|status> &7— 2FA"
+help_cmd_captcha = "&f/captcha <код> &7— капча"
+help_cmd_server = "&f/server <имя> &7— перейти на сервер"
+help_cmd_hub = "&f/hub &7— на лобби"
+help_cmd_find = "&f/find <игрок> &7— найти игрока"
+help_cmd_serverlist = "&f/serverlist &7— список серверов"
+help_cmd_ping = "&f/ping &7— пинг прокси"
+help_cmd_help = "&f/help &7— эта справка"
+help_admin_header = "&7--- Админ ---"
+help_auth_delete = "&f/auth player <ник> delete &7— удалить аккаунт"
+help_auth_password = "&f/auth player <ник> password <пароль> &7— сменить пароль"
+help_perm_grant = "&f/perm user <ник> <право> &7— выдать право"
+help_perm_revoke = "&f/perm user <ник> -<право> &7— забрать право"
+
+# --- Shutdown ---
+shutdown_message = "&c&lРЕБУТ СЕРВЕРА &f» &fПрокси перезагружается. Переподключитесь через несколько секунд."
+
+# --- Fallback ---
+fallback_kick = "&b&lRustProxy &f» &eСервер &c{server} &eушёл оффлайн. &fПерекидываем на &a{fallback} &bбез дисконнекта."
+
+# ════════════════════════════════════════════════════════════════════════════════
+# Права доступа по умолчанию (выдаются всем при регистрации):
+#   command.server, command.hub, command.login, command.register, command.link,
+#   command.tfa, command.captcha, command.ping, command.help, command.find,
+#   command.serverlist, command.proxy
+#
+# Админские права (только через /perm):
+#   command.alert, command.admin, command.perm
+# ════════════════════════════════════════════════════════════════════════════════

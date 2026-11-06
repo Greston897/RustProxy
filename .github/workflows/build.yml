@@ -36,17 +36,8 @@ jobs:
           path: target
           key: ${{ runner.os }}-cargo-target-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Run clippy (capture to file)
-        run: cargo clippy --all-targets 2>&1 | tee /tmp/clippy_output.txt; exit 0
-
-      - name: Show clippy output as annotations
-        if: always()
-        run: |
-          if [ -f /tmp/clippy_output.txt ]; then
-            while IFS= read -r line; do
-              echo "::notice::$line"
-            done < /tmp/clippy_output.txt
-          fi
+      - name: Run clippy
+        run: cargo clippy --all-targets
 
       - name: Build release
         run: cargo build --release
