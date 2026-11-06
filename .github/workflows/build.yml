@@ -28,13 +28,13 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-v2-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Cache target directory
         uses: actions/cache@v4
         with:
           path: target
-          key: ${{ runner.os }}-cargo-target-${{ hashFiles('**/Cargo.lock') }}-v2
+          key: ${{ runner.os }}-cargo-target-v3-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Build release
         run: cargo build --release 2>&1 | sed 's/\x1b\[[0-9;]*m//g' | grep -E "^error|-->" | head -40 | while IFS= read -r line; do echo "::error::$line"; done; exit 0
