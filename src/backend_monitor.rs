@@ -158,7 +158,7 @@ impl BackendMonitor {
     }
 
     pub fn register(&self, name: String, address: String) {
-        self.snapshots.insert(name.clone(), Arc::new(BackendSnapshot::new(name, address)));
+        self.snapshots.insert(name.clone(), Arc::new(BackendSnapshot::new(name.clone(), address)));
         self.history.insert(name, PingHistory::new());
     }
 
