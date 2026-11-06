@@ -42,7 +42,7 @@ use crate::proxy::{BackendLink, PlayerSession, Proxy};
 use crate::tfa::TfaManager;
 use uuid::Uuid;
 
-type ClientLink = Arc<tokio::sync::Mutex<Framed<TcpStream, MinecraftCodec>>>;
+pub type ClientLink = Arc<tokio::sync::Mutex<Framed<TcpStream, MinecraftCodec>>>;
 
 pub async fn handle_connection(
     stream: TcpStream,
@@ -313,7 +313,7 @@ async fn handle_play_full(
 
     let _ = proxy.players.insert(
         uuid,
-        Arc::new(PlayerSession::new(uuid, &username, client_protocol, server_protocol)),
+        Arc::new(PlayerSession::new(uuid, &username, Arc::clone(&client), client_protocol, server_protocol)),
     );
 
     // Сообщение: нужна авторизация
@@ -385,7 +385,7 @@ async fn handle_play_cached(
     let client = Arc::new(tokio::sync::Mutex::new(client));
     let backend = Arc::new(tokio::sync::Mutex::new(backend));
 
-    let mut ps = PlayerSession::new(uuid, &username, client_protocol, server_protocol);
+    let mut ps = PlayerSession::new(uuid, &username, Arc::clone(&client), client_protocol, server_protocol);
     ps.authenticated = true;
     ps.login_ip = Some(peer_ip);
     proxy.players.insert(uuid, Arc::new(ps));
@@ -1078,6 +1078,34 @@ async fn handle_all_commands(
         }
         "/serverlist" => {
             send_server_list_message(client, proxy);
+        }
+        "/proxy" => {
+            let count = proxy.players.len();
+            let monitor = &proxy.monitor;
+            let servers: Vec<String> = proxy.servers.iter().map(|e| e.key().clone()).collect();
+            send_hex_chat(client, &format!(
+                "&7=== &bRustProxy &7Прокси &7===\n&7Версия: &f{} &7| &7Протоколы: &f754-777\n&7Игроков: &f{} &7| &7TPS: &a{:.1} &7| &7Серверы: &f{}",
+                env!("CARGO_PKG_VERSION"),
+                count,
+                monitor.average_tps(),
+                servers.join(", ")
+            )).await.ok();
+        }
+        "/alert" => {
+            if parts.len() < 2 {
+                send_hex_chat(client, "&cИспользование: &f/alert <сообщение>").await.ok();
+                return Ok(());
+            }
+            let message = parts[1..].join(" ");
+            let payload = serde_json::json!({"text": "", "extra": [
+                serde_json::json!({"text": "&c&lАЛЕРТ &f» &f", "color": "reset"}),
+                serde_json::json!({"text": convert_to_minecraft(&message), "color": "reset"}),
+            ]}).to_string();
+            let pkt = packet_bytes(PLAY_CHAT_MESSAGE_CLIENTBOUND, payload.as_bytes());
+            for entry in proxy.players.iter() {
+                let _ = entry.value().client.lock().await.send(pkt.clone()).await;
+            }
+            send_hex_chat(client, "&aАлерт отправлен всем игрокам.").await.ok();
         }
         "/ping" => {
             let count = proxy.players.len();

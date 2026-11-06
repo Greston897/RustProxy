@@ -23,6 +23,7 @@ use crate::ddos_protection::DDoSManager;
 use crate::fallback::FallbackManager;
 use crate::metrics::Metrics;
 use crate::network::listener;
+use crate::network::connection::ClientLink;
 use crate::protocol::codec::MinecraftCodec;
 use crate::protocol::encryption::ServerKeyPair;
 use crate::protocol::packets::{
@@ -69,6 +70,7 @@ pub struct Server {
 pub struct PlayerSession {
     pub uuid: Uuid,
     pub username: String,
+    pub client: ClientLink,
     pub connected_at: Instant,
     pub client_protocol: i32,
     pub server_protocol: i32,
@@ -86,10 +88,11 @@ pub struct BackendLink {
 }
 
 impl PlayerSession {
-    pub fn new(uuid: Uuid, username: &str, client_protocol: i32, server_protocol: i32) -> Self {
+    pub fn new(uuid: Uuid, username: &str, client: ClientLink, client_protocol: i32, server_protocol: i32) -> Self {
         Self {
             uuid,
             username: username.to_string(),
+            client,
             connected_at: Instant::now(),
             client_protocol,
             server_protocol,
