@@ -57,8 +57,7 @@ num_cpus = "1"
 # CLI
 clap = { version = "4", features = ["derive"] }
 
-# NBT для переводчиков пакетов (Join Game, Spawn Position и др. содержат Compound TAG)
-simdnbt = "0.5"
+
 
 # CAPTCHA и криптография
 sha3 = "0.10"
