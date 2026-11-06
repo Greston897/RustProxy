@@ -1,0 +1,61 @@
+name: Build RustProxy
+
+on:
+  push:
+    branches: [arena/4528e98d-rustproxy]
+  pull_request:
+    branches: [arena/4528e98d-rustproxy]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache target directory
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: ${{ runner.os }}-cargo-target-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Run clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Build debug
+        run: cargo build
+
+      - name: Build release
+        run: cargo build --release
+
+      - name: Run tests
+        run: cargo test
+
+      - name: Show release binary size
+        run: ls -lh target/release/rustproxy
+
+      - name: Upload release binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: rustproxy-release
+          path: target/release/rustproxy
+          retention-days: 7

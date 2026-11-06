@@ -10,7 +10,6 @@
 
 use anyhow::{bail, Result};
 use dashmap::DashMap;
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -18,7 +17,7 @@ use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 /// Данные аккаунта игрока.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct Account {
     pub uuid: Uuid,
     pub username: String,

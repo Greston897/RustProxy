@@ -159,6 +159,21 @@ async fn handle_login(
         bail!("expected login start, got id {id}");
     }
     let start = parse_login_start(&body).context("parse login start")?;
+
+    // Валидация имени игрока (защита от слишком длинных / некорректных ников)
+    if start.username.is_empty()
+        || start.username.len() > 16
+        || !start.username.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+    {
+        warn!(%peer, "Некорректное имя игрока: {}", start.username);
+        send_login_disconnect(
+            client,
+            &convert_to_minecraft("&cНекорректное имя игрока."),
+        )
+        .await?;
+        return Ok(());
+    }
+
     debug!(%peer, username = %start.username, uuid = %start.uuid, protocol, "login start");
 
     // 2. IP-кэш авторизации (1 час, сброс при смене IP)
@@ -1273,8 +1288,6 @@ async fn do_server_switch(
     info!(%username, target = %name, "server switch requested");
     proxy.metrics.inc_server_switches();
 
-    let _ = std::mem::replace(abort_tx, None);
-
     let new_link = proxy.connect_to_server(name, client_protocol, &LoginStart {
         uuid: *uuid,
         username: username.to_string(),
@@ -1290,14 +1303,15 @@ async fn do_server_switch(
         }).await?;
     }
 
-    if let Some(old_session) = proxy.players.remove(uuid) {
-        let mut new_session = (*old_session).clone();
-        new_session.server_protocol = new_server_protocol;
-        proxy.players.insert(*uuid, Arc::new(new_session));
+    if let Some(mut entry) = proxy.players.get_mut(uuid) {
+        let sess = Arc::make_mut(&mut entry);
+        sess.server_protocol = new_server_protocol;
     }
 
+    // Только после успешного переключения заменяем abort-канал (старые задачи прерываются)
     let (abort_tx2, abort_rx2) = mpsc::unbounded_channel::<()>();
-    *abort_tx = Some(abort_tx2);
+    let _old = std::mem::replace(abort_tx, Some(abort_tx2));
+    let _ = _old; // старый канал больше не нужен, его задача уже должна завершиться
     let b_client = Arc::clone(client);
     let b_backend = Arc::new(tokio::sync::Mutex::new(framed));
     let m = Arc::clone(&proxy.metrics);

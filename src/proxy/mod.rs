@@ -226,6 +226,7 @@ impl Proxy {
                         return;
                     }
                     p.security.cleanup();
+                    p.ddos.cleanup();
                     p.auth.cleanup_expired();
                     p.tfa.lock().await.cleanup_expired();
                     p.captcha.lock().await.cleanup_expired();
