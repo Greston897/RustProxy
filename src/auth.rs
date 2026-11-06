@@ -32,8 +32,6 @@ pub struct Account {
     pub tg_chat_id: Option<i64>,
     /// 2FA включён?
     pub tfa_enabled: bool,
-    /// Админ-права (выдаются навсегда командой /admin)
-    pub is_admin: bool,
 }
 
 impl Account {
@@ -51,7 +49,6 @@ impl Account {
             total_logins: 0,
             tg_chat_id: None,
             tfa_enabled: false,
-            is_admin: false,
         }
     }
 
@@ -195,11 +192,18 @@ impl AuthManager {
         self.accounts.get(username).map(|e| e.clone())
     }
 
-    /// Выдать/забрать админ-права (навсегда).
-    pub fn set_admin(&self, username: &str, admin: bool) {
-        if let Some(mut acc) = self.accounts.get_mut(username) {
-            acc.is_admin = admin;
+    /// Сбросить регистрацию аккаунта (удаляет аккаунт完全).
+    pub fn reset_account(&self, username: &str) -> Result<()> {
+        if !self.accounts.contains_key(username) {
+            bail!(\"Аккаунт не найден.\");
         }
+        self.accounts.remove(username);
+        // Удаляем обратную связь UUID→username
+        let uuid_opt = self.uuid_to_username.iter().find(|e| e.value() == username).map(|e| *e.key());
+        if let Some(uuid) = uuid_opt {
+            self.uuid_to_username.remove(&uuid);
+        }
+        Ok(())
     }
 
     /// Проверка существования аккаунта.

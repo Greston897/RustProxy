@@ -25,6 +25,8 @@ pub mod fallback;
 pub mod metrics;
 pub mod messages;
 pub mod network;
+pub mod permissions;
 pub mod protocol;
 pub mod proxy;
+pub mod security;
 pub mod tfa;

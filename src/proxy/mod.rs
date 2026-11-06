@@ -16,6 +16,7 @@ use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 use crate::auth::AuthManager;
+use crate::ban::BanManager;
 use crate::backend_monitor::BackendMonitor;
 use crate::captcha::CaptchaManager;
 use crate::config::ProxyConfig;
@@ -24,7 +25,9 @@ use crate::fallback::FallbackManager;
 use crate::metrics::Metrics;
 use crate::network::listener;
 use crate::network::connection::ClientLink;
+use crate::permissions::PermissionManager;
 use crate::protocol::codec::MinecraftCodec;
+use crate::security::SecurityManager;
 use crate::protocol::encryption::ServerKeyPair;
 use crate::protocol::packets::{
     handshake_bytes, login_start_bytes, packet_bytes, Handshake, LoginStart, ids, LOGIN_START,
@@ -38,6 +41,8 @@ pub struct Proxy {
     pub tfa: Arc<Mutex<TfaManager>>,
     pub captcha: Arc<Mutex<CaptchaManager>>,
     pub ban: Arc<BanManager>,
+    pub permissions: Arc<PermissionManager>,
+    pub security: Arc<SecurityManager>,
     pub key_pair: ServerKeyPair,
     pub metrics: Arc<Metrics>,
     pub ddos: Arc<DDoSManager>,
@@ -114,6 +119,8 @@ impl Proxy {
         let tfa = Arc::new(Mutex::new(TfaManager::new(config.tfa.bot_token.clone())?));
         let captcha = Arc::new(Mutex::new(CaptchaManager::new()?));
         let ban = Arc::new(BanManager::new());
+        let permissions = Arc::new(PermissionManager::new());
+        let security = Arc::new(SecurityManager::new());
         let key_pair = ServerKeyPair::generate()?;
         info!("RSA ключевая пара сгенерирована (1024 бит)");
         let metrics = Arc::new(Metrics::new());
@@ -146,6 +153,8 @@ impl Proxy {
             tfa,
             captcha,
             ban,
+            permissions,
+            security,
             key_pair,
             metrics,
             ddos,
@@ -214,6 +223,23 @@ impl Proxy {
             })
         };
 
+        let security_task = {
+            let p = Arc::clone(&self);
+            tokio::spawn(async move {
+                let mut interval = time::interval(Duration::from_secs(60));
+                loop {
+                    interval.tick().await;
+                    if p.is_shutting_down() {
+                        return;
+                    }
+                    p.security.cleanup();
+                    p.auth.cleanup_expired();
+                    p.tfa.lock().await.cleanup_expired();
+                    p.captcha.lock().await.cleanup_expired();
+                }
+            })
+        };
+
         tokio::signal::ctrl_c().await.ok();
         info!("Graceful shutdown...");
 
@@ -222,6 +248,7 @@ impl Proxy {
         pinger_task.abort();
         monitor_task.abort();
         tfa_task.abort();
+        security_task.abort();
 
         let player_uuids: Vec<Uuid> = self.players.iter().map(|e| *e.key()).collect();
         for uuid in player_uuids {
