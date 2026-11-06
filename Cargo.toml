@@ -64,7 +64,7 @@ simdnbt = "0.5"
 sha3 = "0.10"
 rand_chacha = "0.3"
 image = { version = "0.25", features = ["png"] }
-qrencode = "0.7"
+qrencode = "0.14"
 
 # Telegram Bot API
 teloxide = "0.21"
