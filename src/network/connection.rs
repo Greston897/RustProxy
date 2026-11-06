@@ -319,6 +319,9 @@ async fn handle_play_full(
 
     metrics.inc_active_players();
 
+    // Продакшен-защита: учитываем игрока в лимите на IP
+    proxy.security.add_player_ip(peer_ip);
+
     let client = Arc::new(tokio::sync::Mutex::new(client));
     let backend = Arc::new(tokio::sync::Mutex::new(backend));
 
@@ -393,6 +396,9 @@ async fn handle_play_cached(
 ) -> Result<()> {
     let metrics = Arc::clone(&proxy.metrics);
     metrics.inc_active_players();
+
+    // Продакшен-защита: учитываем игрока в лимите на IP
+    proxy.security.add_player_ip(peer_ip);
 
     let client = Arc::new(tokio::sync::Mutex::new(client));
     let backend = Arc::new(tokio::sync::Mutex::new(backend));
@@ -928,17 +934,10 @@ async fn handle_all_commands(
                             }
                         }
                     } else {
-                        let new_session = proxy
-                            .players
-                            .get_mut(uuid)
-                            .map(|entry| {
-                                let mut s = (*entry).clone();
-                                s.authenticated = true;
-                                s.login_ip = Some(peer_ip);
-                                s
-                            });
-                        if let Some(s) = new_session {
-                            proxy.players.insert(*uuid, Arc::new(s));
+                        if let Some(mut entry) = proxy.players.get_mut(uuid) {
+                            let sess = Arc::make_mut(&mut entry);
+                            sess.authenticated = true;
+                            sess.login_ip = Some(peer_ip);
                         }
                         send_hex_chat(client, &format!("&a&lАвторизация &f» &fДобро пожаловать, &e{}", username)).await.ok();
 
@@ -961,17 +960,10 @@ async fn handle_all_commands(
                 send_hex_chat(client, "&cНет прав на команду /logout.").await.ok();
                 return Ok(());
             }
-            let new_session = proxy
-                .players
-                .get_mut(uuid)
-                .map(|entry| {
-                    let mut s = (*entry).clone();
-                    s.authenticated = false;
-                    s.login_ip = None;
-                    s
-                });
-            if let Some(s) = new_session {
-                proxy.players.insert(*uuid, Arc::new(s));
+            if let Some(mut entry) = proxy.players.get_mut(uuid) {
+                let sess = Arc::make_mut(&mut entry);
+                sess.authenticated = false;
+                sess.login_ip = None;
             }
             send_hex_chat(client, "&c&lВы вышли из аккаунта &f» &fВведите &a/login <пароль> &fдля входа.").await.ok();
             info!(%username, "logged out");
@@ -1055,16 +1047,9 @@ async fn handle_all_commands(
             let answer = parts[1];
             match proxy.captcha.lock().await.check_answer(uuid, answer, peer_ip) {
                 Ok(true) => {
-                    let new_session = proxy
-                        .players
-                        .get_mut(uuid)
-                        .map(|entry| {
-                            let mut s = (*entry).clone();
-                            s.captcha_verified = true;
-                            s
-                        });
-                    if let Some(s) = new_session {
-                        proxy.players.insert(*uuid, Arc::new(s));
+                    if let Some(mut entry) = proxy.players.get_mut(uuid) {
+                        let sess = Arc::make_mut(&mut entry);
+                        sess.captcha_verified = true;
                     }
                     send_hex_chat(client, "&a&lCAPTCHA &f» &fПройдено! Освобождение на 4 часа.").await.ok();
                     info!(%username, "CAPTCHA passed");

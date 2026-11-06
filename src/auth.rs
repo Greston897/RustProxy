@@ -95,8 +95,13 @@ impl AuthManager {
             accounts: DashMap::new(),
             ip_cache: DashMap::new(),
             uuid_to_username: DashMap::new(),
-            cache_ttl: Duration::from_secs(3600), // 1 час
+            cache_ttl: Duration::from_secs(3600), // 1 час по умолчанию
         }
+    }
+
+    /// Установить TTL кэша IP (из конфига).
+    pub fn set_cache_ttl(&mut self, ttl_secs: u64) {
+        self.cache_ttl = Duration::from_secs(ttl_secs);
     }
 
     /// Зарегистрировать аккаунт.

@@ -58,6 +58,7 @@ pub struct PooledBackendConnection {
     pub framed: Framed<TcpStream, MinecraftCodec>,
     pub protocol: i32,
     pub last_used: Instant,
+    pub created_at: Instant,
 }
 
 pub struct Server {
@@ -109,7 +110,8 @@ impl PlayerSession {
 
 impl Proxy {
     pub async fn new(config: Arc<ProxyConfig>) -> Result<Self> {
-        let auth = AuthManager::new();
+        let mut auth = AuthManager::new();
+        auth.set_cache_ttl(config.auth_local.cache_ttl_secs);
         let tfa = Arc::new(Mutex::new(TfaManager::new(config.tfa.bot_token.clone())?));
         let captcha = Arc::new(Mutex::new(CaptchaManager::new()?));
         let permissions = Arc::new(PermissionManager::new());
@@ -188,13 +190,12 @@ impl Proxy {
                         match p.tfa.lock().await.handle_bot_response(upd.chat_id, &upd.text, cb) {
                             Ok(Some(uuid)) => {
                                 info!(%uuid, "TFA login confirmed via Telegram (кнопка /da)");
-                                if let Some(ps) = p.players.get(&uuid) {
-                                    let mut new_ps = (*ps).clone();
-                                    new_ps.tfa_verified = true;
-                                    new_ps.authenticated = true;
-                                    p.players.insert(uuid, Arc::new(new_ps));
-                                    let client_link = ps.client.clone();
-                                    let username = new_ps.username.clone();
+                                if let Some(mut entry) = p.players.get_mut(&uuid) {
+                                    let sess = Arc::make_mut(&mut entry);
+                                    sess.tfa_verified = true;
+                                    sess.authenticated = true;
+                                    let client_link = sess.client.clone();
+                                    let username = sess.username.clone();
                                     let _ = crate::network::connection::send_hex_chat_to_link(
                                         &client_link,
                                         &format!("&a&lВход подтверждён &f» &fДобро пожаловать, &e{}", username),
@@ -242,10 +243,23 @@ impl Proxy {
         tfa_task.abort();
         security_task.abort();
 
+        // Уведомляем всех игроков о shutdown и закрываем их соединения
         let player_uuids: Vec<Uuid> = self.players.iter().map(|e| *e.key()).collect();
         for uuid in player_uuids {
-            self.players.remove(&uuid);
+            if let Some(entry) = self.players.get(&uuid) {
+                let _ = entry.client.lock().await.send(
+                    crate::protocol::packets::packet_bytes(
+                        crate::protocol::packets::ids::PLAY_CHAT_MESSAGE_CLIENTBOUND,
+                        r#"{"text":"&c&lРЕБУТ СЕРВЕРА &f» &fПрокси перезагружается. Переподключитесь через несколько секунд.","color":"red"}"#.as_bytes(),
+                    ),
+                ).await;
+            }
         }
+
+        // Небольшая пауза для доставки сообщений
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        self.players.clear();
 
         for entry in self.backend_pool.iter() {
             let mut conns = entry.value().lock().await;
@@ -416,7 +430,11 @@ impl Proxy {
 
         if let Some(pool_entry) = self.backend_pool.get(name) {
             let mut pool = pool_entry.lock().await;
-            if let Some(pos) = pool.iter().position(|c| c.protocol == protocol) {
+            // Берём самое подходящее соединение из пула, не старше 30 сек
+            if let Some(pos) = pool
+                .iter()
+                .position(|c| c.protocol == protocol && c.created_at.elapsed() < std::time::Duration::from_secs(30))
+            {
                 let pooled = pool.remove(pos);
                 info!("переиспользование соединения из пула для {} (протокол {})", name, protocol);
                 return Ok(BackendLink {
@@ -480,11 +498,15 @@ impl Proxy {
         if let Some(pool_entry) = self.backend_pool.get(&link.server.name) {
             let mut pool = pool_entry.lock().await;
             const MAX_POOL_PER_SERVER: usize = 64;
-            if pool.len() < MAX_POOL_PER_SERVER {
+            // Не класть в пул старые (мёртвые) соединения
+            if link.framed.get_ref().peer_addr().is_ok()
+                && pool.len() < MAX_POOL_PER_SERVER
+            {
                 pool.push(PooledBackendConnection {
                     framed: link.framed,
                     protocol: link.protocol,
                     last_used: Instant::now(),
+                    created_at: Instant::now(),
                 });
             }
         }
