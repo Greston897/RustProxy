@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
 
 env:
-  CARGO_TERM_COLOR: always
+  CARGO_TERM_COLOR: never
 
 jobs:
   build:
@@ -51,26 +51,20 @@ jobs:
               tail -n 80 build.clean.log
               echo '```'
             } >> "$GITHUB_STEP_SUMMARY"
-            # Текст с первой строки `error` до конца; чанкуем на аннотации по ~5500 символов
-          python3 << 'PYEOF'
+            # Только блоки `^error` (без warnings) — всё помещается в ~10 аннотаций
+            python3 << 'PYEOF'
           import re
           data = open('build.clean.log', errors='replace').read()
-          m = re.search(r'(?m)^error', data)
-          text = data[m.start():] if m else data
-          text = text[-56000:]
-          chunks = [text[i:i+5500] for i in range(0, len(text), 5500)][:12]
-          for c in chunks:
+          parts = re.split(r'(?m)(?=^error)', data)
+          parts = [p for p in parts if p.startswith('error')]
+          print(f'TOTAL_ERROR_BLOCKS={len(parts)}')
+          text = '\n'.join(p.rstrip() for p in parts)
+          text = text[-60000:]
+          chunks = [text[i:i+6000] for i in range(0, len(text), 6000)][:9]
+          for idx, c in enumerate(chunks):
               c = c.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
-              print(f'::error::{c}')
+              print(f'::error title=errlog-{idx:02d}/{len(chunks)-1:02d}::{c}')
           PYEOF
-            # По одному annotations на каждую строку-локацию rustc (file:line)
-            grep -E '^[[:space:]]+--> ' build.clean.log | head -8 | while IFS= read -r loc; do
-              path=$(printf '%s' "$loc" | sed -E 's/.*-->[[:space:]]*([^:]+):.*/\1/' | tr -d ' ')
-              line=$(printf '%s' "$loc" | grep -oE ':[0-9]+:[0-9]+' | head -1 | cut -d: -f2)
-              if [ -n "$path" ] && [ -n "$line" ]; then
-                echo "::error file=$path,line=$line::see build error details"
-              fi
-            done
             exit 1
           }
 
