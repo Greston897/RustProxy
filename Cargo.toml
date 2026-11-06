@@ -67,7 +67,7 @@ image = { version = "0.25", features = ["png"] }
 qrencode = "0.14"
 
 # Telegram Bot API
-teloxide = "0.21"
+teloxide = "0.17"
 
 # metriки (развитие)
 prometheus = { version = "0.13", features = ["process"] }
