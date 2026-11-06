@@ -1,0 +1,67 @@
+[proxy]
+name = "RustProxy"
+motd = "&b&lRustProxy &f» Ideal Top Proxy"
+online_mode = false
+max_players = 2000
+compression_threshold = 256
+read_timeout_secs = 30
+write_timeout_secs = 30
+idle_timeout_secs = 300
+default_server = "lobby"
+fallback_server = "lobby"
+
+[network]
+bind = "0.0.0.0:25565"
+worker_threads = 0   # 0 = все ядра CPU
+tcp_nodelay = true
+keepalive_interval_secs = 30
+keepalive_timeout_secs = 90
+
+[status]
+motd = "&bRustProxy &7| &e1.16.5 → 26.3"
+max_players = 2000
+ping_interval_secs = 30
+
+[[servers]]
+name = "lobby"
+address = "127.0.0.1:25566"
+enabled = true
+
+[[servers]]
+name = "survival"
+address = "127.0.0.1:25567"
+enabled = true
+
+[[servers]]
+name = "fallback"
+address = "127.0.0.1:25568"
+enabled = true
+
+[auth]
+mode = "offline"   # offline | online | microsoft (этап 5)
+
+[auth.local]
+enabled = false   # локальная регистрация/логин (этап 9)
+bot_token = "YOUR_BOT_TOKEN"
+admin_chat_id = 0
+
+[captcha]
+enabled = false   # включить проверку на бота
+ttl_secs = 60
+max_attempts = 3
+
+[ddos]
+enabled = true
+max_nbt_depth = 16
+max_nbt_tag_size = 1048576
+max_nbt_list_size = 10000
+nbt_packets_per_sec = 50
+max_connections_per_sec_per_ip = 100
+ban_duration_secs = 3600
+
+[fallback]
+enabled = true
+fallback_server = "lobby"
+auto_return = true
+health_check_interval_secs = 15
+kick_message = "&b&lRustProxy &f» &eСервер &c{server} &eушёл оффлайн. &fПерекидываем на &a{fallback} &bбез дисконнекта."

@@ -1,0 +1,81 @@
+[package]
+name = "rustproxy"
+version = "0.1.0"
+edition = "2021"
+description = "BungeeCord-like Minecraft network proxy on Rust. Auth, versions 1.16.5 (754) → 26.3 (777), multi-threaded Tokio core, target 2000+ CCU."
+authors = ["RustProxy"]
+license = "MIT"
+repository = "https://github.com/Greston897/RustProxy"
+
+[dependencies]
+# Async runtime — multi-threaded, все ядра контейнера
+tokio = { version = "1", features = ["full", "rt-multi-thread", "macros", "time"] }
+tokio-util = { version = "0.7", features = ["codec"] }
+bytes = "1.8"
+
+# Minecraft сжатие (zlib)
+flate2 = { version = "1", features = ["zlib"] }
+
+# Конфиг
+toml = "0.8"
+
+# Сериализация
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["json"] }
+
+# Ошибки
+anyhow = "1"
+thiserror = "1"
+
+# Sink/Stream методы для Framed (.send/.await, .next/.await)
+futures-util = "0.3"
+
+# Шифрование логина (AES/CFB8 + RSA PKCS#1 v1.5, как в Minecraft)
+aes = "0.10"
+cipher = "0.4"
+rsa = { version = "0.9", features = ["pkcs1v15", "spki"] }
+rand = "0.8"
+
+# Логирование
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+# UUID (офлайн UUID = name-based, как в Bungee/Velocity)
+uuid = { version = "1", features = ["v4", "serde"] }
+md5 = "0.10"
+
+# Auth (Mojang / Microsoft шаг 2)
+base64 = "0.22"
+hmac = "0.12"
+sha2 = "0.10"
+reqwest = { version = "0.11", features = ["json"] }
+
+# Безблокирующие карты под высокую нагрузку
+dashmap = "5"
+num_cpus = "1"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# NBT для переводчиков пакетов (Join Game, Spawn Position и др. содержат Compound TAG)
+simdnbt = "0.5"
+
+# CAPTCHA и криптография
+sha3 = "0.10"
+rand_chacha = "0.3"
+image = { version = "0.25", features = ["png"] }
+qrencode = "0.7"
+
+# Telegram Bot API
+teloxide = "0.21"
+
+# HEX цвета и красивые сообщения
+ansi-parser = "0.1"
+
+# ДDoS защита и лимитирование
+tokio-tungstenite = "0.21"
+
+# metriки (развитие)
+prometheus = { version = "0.13", features = ["process"] }
+
+[workspace]
