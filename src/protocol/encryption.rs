@@ -17,6 +17,7 @@ use cipher::{KeyInit, BlockSizeUser};
 use cipher::generic_array::GenericArray;
 use rand::RngCore;
 use rsa::{RsaPrivateKey, RsaPublicKey, Pkcs1v15Encrypt};
+use rsa::pkcs8::DecodePublicKey;
 
 /// DER-кодировка длины (Berkeley-length). Возвращает байты длины для значения `len`.
 fn der_length(len: usize, out: &mut Vec<u8>) {
