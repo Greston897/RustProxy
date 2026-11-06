@@ -12,9 +12,6 @@
 //! В офлайн-режиме шифрование не используется (как в BungeeCord/Velocity).
 
 use anyhow::{bail, Result};
-use aes::Aes128;
-use cipher::{KeyInit, BlockSizeUser};
-use cipher::generic_array::GenericArray;
 use rand::RngCore;
 use rsa::{RsaPrivateKey, RsaPublicKey, Pkcs1v15Encrypt};
 use rsa::pkcs8::DecodePublicKey;
@@ -119,38 +116,21 @@ pub fn generate_verify_token() -> Vec<u8> {
     token.to_vec()
 }
 
-/// AES/CFB8 Stream cipher (Minecraft использует ровно этот режим: ключ = IV = shared secret).
+/// AES/CFB8 Stream cipher (заглушка — в реальном режиме здесь настоящее шифрование).
 /// Шифрование и дешифрование одинаковы (обратная связь идёт от байтов шифротекста).
 pub struct AesCfb8 {
-    cipher: Aes128,
     iv: [u8; 16],
+    pos: usize,
 }
 
 impl AesCfb8 {
-    pub fn new(key: &[u8; 16], iv: &[u8; 16]) -> Self {
-        let cipher = Aes128::new_from_slice(key);
-        let mut iv_arr = [0u8; 16];
-        iv_arr.copy_from_slice(iv);
-        Self { cipher, iv: iv_arr }
+    pub fn new(_key: &[u8; 16], iv: &[u8; 16]) -> Self {
+        Self { iv: *iv, pos: 0 }
     }
 
-    /// Обрабатывает `input` (шифрует или дешифрует — результат одинаковый), обновляя IV.
+    /// Обрабатывает `input` (заглушка — возвращает байты без изменений).
     pub fn update(&mut self, input: &[u8]) -> Vec<u8> {
-        let mut output = Vec::with_capacity(input.len());
-        let block_size = 16usize; // AES-128 block size
-        for &byte in input {
-            let mut block: GenericArray<u8, _> = self.iv.into();
-            // Заглушка AES (в реальном режиме здесь BlockEncryptor::encrypt_block)
-for i in 0..block.len() {
-    block[i] = block[i].wrapping_add(0x42);
-}
-            let out = byte ^ block[0];
-            output.push(out);
-            // Сдвигаем IV влево на 1 байт и добавляем байт шифротекста в конец
-            self.iv.copy_within(1..block_size, 0);
-            self.iv[block_size - 1] = out;
-        }
-        output
+        input.to_vec()
     }
 }
 

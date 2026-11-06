@@ -33,9 +33,7 @@ thiserror = "1"
 # Sink/Stream методы для Framed (.send/.await, .next/.await)
 futures-util = "0.3"
 
-# Шифрование логина (AES/CFB8 + RSA PKCS#1 v1.5, как в Minecraft)
-aes = "0.9"
-cipher = "0.4"
+# Шифрование логина (RSA PKCS#1 v1.5, как в Minecraft)
 rsa = "0.9"
 rand = "0.8"
 
