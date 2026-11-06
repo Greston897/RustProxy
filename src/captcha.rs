@@ -173,7 +173,7 @@ impl CaptchaManager {
     }
 
     /// Зарегистрировать неудачу IP.
-    fn register_ip_failure(&self, ip: IpAddr) {
+    fn register_ip_failure(&mut self, ip: IpAddr) {
         let failures = self.ip_failures.entry(ip).or_insert(0);
         *failures += 1;
         let fails = *failures;
