@@ -16,7 +16,6 @@ use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 use crate::auth::AuthManager;
-use crate::ban::BanManager;
 use crate::backend_monitor::BackendMonitor;
 use crate::captcha::CaptchaManager;
 use crate::config::ProxyConfig;
@@ -27,12 +26,12 @@ use crate::network::listener;
 use crate::network::connection::ClientLink;
 use crate::permissions::PermissionManager;
 use crate::protocol::codec::MinecraftCodec;
-use crate::security::SecurityManager;
 use crate::protocol::encryption::ServerKeyPair;
 use crate::protocol::packets::{
     handshake_bytes, login_start_bytes, packet_bytes, Handshake, LoginStart, ids, LOGIN_START,
 };
 use crate::protocol::versions;
+use crate::security::SecurityManager;
 use crate::tfa::TfaManager;
 
 pub struct Proxy {
@@ -40,7 +39,6 @@ pub struct Proxy {
     pub auth: AuthManager,
     pub tfa: Arc<Mutex<TfaManager>>,
     pub captcha: Arc<Mutex<CaptchaManager>>,
-    pub ban: Arc<BanManager>,
     pub permissions: Arc<PermissionManager>,
     pub security: Arc<SecurityManager>,
     pub key_pair: ServerKeyPair,
@@ -83,8 +81,6 @@ pub struct PlayerSession {
     pub tfa_verified: bool,
     pub captcha_verified: bool,
     pub login_ip: Option<std::net::IpAddr>,
-    /// Клиентский бренд (из minecraft:brand), часть отпечатка.\n    pub client_brand: Option<String>,
-    /// Отпечаток клиента для поиска твинов (не только IP).\n    pub fingerprint: Option<String>,
 }
 
 pub struct BackendLink {
@@ -107,8 +103,6 @@ impl PlayerSession {
             tfa_verified: false,
             captcha_verified: false,
             login_ip: None,
-            client_brand: None,
-            fingerprint: None,
         }
     }
 }
@@ -118,7 +112,6 @@ impl Proxy {
         let auth = AuthManager::new();
         let tfa = Arc::new(Mutex::new(TfaManager::new(config.tfa.bot_token.clone())?));
         let captcha = Arc::new(Mutex::new(CaptchaManager::new()?));
-        let ban = Arc::new(BanManager::new());
         let permissions = Arc::new(PermissionManager::new());
         let security = Arc::new(SecurityManager::new());
         let key_pair = ServerKeyPair::generate()?;
@@ -152,7 +145,6 @@ impl Proxy {
             auth,
             tfa,
             captcha,
-            ban,
             permissions,
             security,
             key_pair,

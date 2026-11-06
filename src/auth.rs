@@ -206,6 +206,19 @@ impl AuthManager {
         Ok(())
     }
 
+    /// Сменить пароль аккаунту (команда /auth player <ник> password <пароль>).
+    pub fn set_password(&self, username: &str, new_password: &str) -> Result<()> {
+        if new_password.len() < 4 {
+            bail!("Пароль должен быть не короче 4 символов.");
+        }
+        if let Some(mut acc) = self.accounts.get_mut(username) {
+            acc.password_hash = hash_password(new_password, &acc.salt);
+            Ok(())
+        } else {
+            bail!("Аккаунт не найден.")
+        }
+    }
+
     /// Проверка существования аккаунта.
     pub fn account_exists(&self, username: &str) -> bool {
         self.accounts.contains_key(username)

@@ -6,6 +6,7 @@ use std::net::IpAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use uuid::Uuid;
 
 /// Счётчик команд игрока (защита от командного флуда).
 #[derive(Default)]

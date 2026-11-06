@@ -1,5 +1,5 @@
 //! Обработка одного соединения игрока с полной интеграцией:
-//! Auth (/login /register /l /reg), TFA (Telegram /link + /da /net), CAPTCHA, Fallback,
+//! Auth (/login /register /l /reg, /auth, /logout), TFA (Telegram /link + /da /net), CAPTCHA, Fallback,
 //! DDoS NBT, все команды BungeeCord (кроме /reply /vanish /message /spy),
 //! чат-компоненты с clickEvent для [connect]/[server] в лобби.
 
@@ -18,7 +18,6 @@ use tracing::{debug, error, info, warn};
 
 use crate::auth::{offline_uuid, AuthManager, AuthMode, PlayerProfile, Session};
 use crate::permissions::Permission;
-use crate::ban::BanManager;
 use crate::backend_monitor::BackendMonitor;
 use crate::captcha::CaptchaManager;
 use crate::config::ProxyConfig;
@@ -63,6 +62,18 @@ pub async fn handle_connection(
     };
 
     let mut client = Framed::new(stream, MinecraftCodec::new());
+    let peer_ip = peer.ip();
+
+    // Продакшен-защита: бан за некорректные пакеты
+    if proxy.security.is_bad_packet_banned(peer_ip) {
+        return Ok(());
+    }
+
+    // Продакшен-защита: лимит игроков на IP
+    if !proxy.security.check_ip_limit(peer_ip) {
+        warn!(%peer, "Лимит игроков на IP превышен");
+        return Ok(());
+    }
 
     // -------------------- Handshake --------------------
     let packet = read_next_with_timeout(&mut client, config.proxy.read_timeout_secs).await?
@@ -116,11 +127,6 @@ async fn handle_status(
         match read_next_with_timeout(client, config.proxy.read_timeout_secs).await? {
             Some(pkt) => {
                 let (id, body) = split_packet(&pkt)?;
-                    // Продакшен-защита: бан за некорректные пакеты
-                    if proxy.security.is_bad_packet_banned(peer_ip) {
-                        return Ok(());
-                    }
-
                 match id {
                     STATUS_REQUEST => {
                         client.send(response_bytes.clone()).await?;
@@ -145,15 +151,6 @@ async fn handle_login(
     proxy: Arc<Proxy>,
     peer: SocketAddr,
 ) -> Result<()> {
-    let peer_ip = peer.ip();
-
-    // Продакшен-защита: лимит игроков на IP
-    if !proxy.security.check_ip_limit(peer_ip) {
-        warn!(%peer, "Лимит игроков на IP превышен");
-        return Ok(());
-    }
-
-
     // 1. Login Start
     let packet = read_next_with_timeout(client, config.proxy.read_timeout_secs).await?
         .context("peer closed before login start")?;
@@ -182,17 +179,6 @@ async fn handle_login(
             &convert_to_minecraft("&cАккаунт не найден. Зарегистрируйтесь: &f/reg <пароль>"),
         )
         .await?;
-        return Ok(());
-    }
-
-    // 4. Проверка бан ника (перед сессией)
-    if proxy.ban.is_nick_banned(&start.username) {
-        if let Some(info) = proxy.ban.nick_ban(&start.username) {
-            let reason = format!("&c&lЗАБАНЕН &f» &c{}\n&7Забанил: &f{}\n&7Причина: &f{}", info.reason, info.banned_by, info.reason);
-            send_login_disconnect(client, &reason).await?;
-        } else {
-            send_login_disconnect(client, "&c&lЗАБАНЕН &f» &fВы забанены.").await?;
-        }
         return Ok(());
     }
 
@@ -244,7 +230,7 @@ async fn handle_login(
             .await?;
     }
 
-    // 6. Login Success
+    // 7. Login Success
     let success = LoginSuccess {
         uuid: session.profile.uuid,
         username: session.profile.username.clone(),
@@ -254,7 +240,7 @@ async fn handle_login(
         .await?;
     info!(%peer, username = %session.profile.username, uuid = %session.profile.uuid, "login success");
 
-    // 7. Подключение к бэкенду + релей логин-фазы
+    // 8. Подключение к бэкенду + релей логин-фазы
     let default_server = config.proxy.default_server.clone();
     let BackendLink {
         server: _,
@@ -263,7 +249,7 @@ async fn handle_login(
     } = proxy.connect_to_server(&default_server, protocol, &start).await?;
     relay_login_phase(client, backend, &*proxy, &start).await?;
 
-    // 8. Play
+    // 9. Play
     handle_play_full(
         client, backend, proxy.config.clone(), proxy, session, protocol,
         backend_protocol, default_server, peer_ip,
@@ -316,7 +302,6 @@ async fn handle_login_cached(
 }
 
 // -------------------- Play: с требованием пароля --------------------
-/// Play: полная версия с бэкендом (пароль + TFA + капча).
 async fn handle_play_full(
     client: Framed<TcpStream, MinecraftCodec>,
     backend: Framed<TcpStream, MinecraftCodec>,
@@ -337,9 +322,9 @@ async fn handle_play_full(
     let client = Arc::new(tokio::sync::Mutex::new(client));
     let backend = Arc::new(tokio::sync::Mutex::new(backend));
 
-    let _ = proxy.players.insert(
+    proxy.players.insert(
         uuid,
-        Arc::new(PlayerSession::new(uuid, &username, Arc::clone(&client), client_protocol, server_protocol)),
+        Arc::new(PlayerSession::new(uuid, &username, client_protocol, server_protocol)),
     );
 
     // Сообщение: нужна авторизация
@@ -387,6 +372,7 @@ async fn handle_play_full(
     proxy.players.remove(&uuid);
     proxy.captcha.lock().await.remove(&uuid);
     proxy.auth.invalidate_ip(&peer_ip);
+    proxy.security.remove_player_ip(peer_ip);
     metrics.dec_active_players();
     info!(%username, "left play state");
     result
@@ -411,12 +397,12 @@ async fn handle_play_cached(
     let client = Arc::new(tokio::sync::Mutex::new(client));
     let backend = Arc::new(tokio::sync::Mutex::new(backend));
 
-    let mut ps = PlayerSession::new(uuid, &username, Arc::clone(&client), client_protocol, server_protocol);
+    let mut ps = PlayerSession::new(uuid, &username, client_protocol, server_protocol);
     ps.authenticated = true;
     ps.login_ip = Some(peer_ip);
     proxy.players.insert(uuid, Arc::new(ps));
 
-    // Приветствие + кликабельные серверы
+    // Приветствие
     let welcome = build_welcome_message(&username);
     {
         let mut c = client.lock().await;
@@ -460,6 +446,7 @@ async fn handle_play_cached(
 
     proxy.players.remove(&uuid);
     proxy.auth.invalidate_ip(&peer_ip);
+    proxy.security.remove_player_ip(peer_ip);
     metrics.dec_active_players();
     info!(%username, "left play state");
     result
@@ -605,10 +592,6 @@ async fn backend_to_client_loop(
                         }
                     };
 
-                    if is_nbt_packet(id) {
-                        // IP игрока неизвестен здесь (нет peer), пропускаем NBT check для b2c
-                    }
-
                     let result = match translate_clientbound(id, &body, from_ver, to_ver) {
                         Ok(r) => r,
                         Err(e) => {
@@ -640,8 +623,7 @@ async fn backend_to_client_loop(
                     }
                 }
                 Ok(None) => {
-                    warn!(%username, "backend disconnected, attempting fallback to {}", server_name);
-                    let _ = do_backend_fallback(&proxy, &client, &username, &server_name).await;
+                    warn!(%username, "backend disconnected");
                     return;
                 }
                 Err(e) => {
@@ -653,27 +635,6 @@ async fn backend_to_client_loop(
             _ = abort_rx.recv() => return,
         }
     }
-}
-
-/// Fallback: перекидываем игрока на fallback-сервер без дисконнекта от прокси.
-async fn do_backend_fallback(
-    proxy: &Arc<Proxy>,
-    client: &ClientLink,
-    username: &str,
-    old_server: &str,
-) -> bool {
-    if !proxy.fallback.config.enabled {
-        return false;
-    }
-    let fallback_name = &proxy.fallback.config.fallback_server;
-    info!(%username, from = %old_server, to = %fallback_name, "FALLBACK: перекидываем на fallback-сервер");
-
-    let msg = fallback::fallback_message(&proxy.config, old_server, fallback_name);
-    send_hex_chat(client, &msg).await.ok();
-
-    // Пробуем переподключиться к fallback — новый бэкенд цикл будет создан caller'ом.
-    // Здесь только уведомляем в чат; соединение клиент-прокси не рвётся.
-    true
 }
 
 // -------------------- Play: клиент → бэкенд (с auth / паролем / TFA / капча) --------------------
@@ -714,6 +675,11 @@ async fn client_to_backend_loop_auth(
 
         // Перехват команд прокси
         if let Some(cmd) = parse_proxy_command(&pkt) {
+            // Продакшен-защита: лимит команд в секунду
+            if !proxy_arc.security.check_command_rate(session.profile.uuid) {
+                send_hex_chat(client, "&cСлишком много команд. Подождите.").await.ok();
+                continue;
+            }
             handle_all_commands(
                 &client, &proxy_arc, &username, &session.profile.uuid, &cmd, peer_ip,
                 abort_tx, &server_name, client_protocol,
@@ -744,26 +710,6 @@ async fn client_to_backend_loop_auth(
                 continue;
             }
         };
-
-        // Отпечаток клиента: сбор бренда из minecraft:brand / MC|Brand (твины, не только IP)
-        if id == 0x09 {
-            if let Some(brand) = extract_client_brand(&body) {
-                if let Some(mut entry) = proxy_arc.players.get_mut(&session.profile.uuid) {
-                    entry.client_brand = Some(brand.clone());
-                    let fp = format!("{}:{}", brand, server_protocol);
-                    entry.fingerprint = Some(fp.clone());
-                    proxy_arc.ban.register_fingerprint(session.profile.uuid, username.clone(), &fp);
-                    if proxy_arc.ban.is_fingerprint_banned(&fp) {
-                        let _ = send_hex_chat(
-                            client,
-                            "&c&lЗАБАНЕН &f» &fВаш отпечаток клиента забанен (твин забаненного аккаунта).",
-                        )
-                        .await;
-                        return Ok(());
-                    }
-                }
-            }
-        }
 
         if is_nbt_packet(id) {
             if !proxy_arc.ddos.check_nbt_packet(peer_ip) {
@@ -842,6 +788,10 @@ async fn client_to_backend_loop_cached(
         };
 
         if let Some(cmd) = parse_proxy_command(&pkt) {
+            if !proxy_arc.security.check_command_rate(uuid) {
+                send_hex_chat(client, "&cСлишком много команд. Подождите.").await.ok();
+                continue;
+            }
             handle_all_commands(
                 &client, &proxy_arc, &username, &uuid, &cmd, peer_ip,
                 abort_tx, &server_name, client_protocol,
@@ -862,26 +812,6 @@ async fn client_to_backend_loop_cached(
                 continue;
             }
         };
-
-        // Отпечаток клиента: сбор бренда из minecraft:brand / MC|Brand (твины, не только IP)
-        if id == 0x09 {
-            if let Some(brand) = extract_client_brand(&body) {
-                if let Some(mut entry) = proxy_arc.players.get_mut(&uuid) {
-                    entry.client_brand = Some(brand.clone());
-                    let fp = format!("{}:{}", brand, server_protocol);
-                    entry.fingerprint = Some(fp.clone());
-                    proxy_arc.ban.register_fingerprint(uuid, username.clone(), &fp);
-                    if proxy_arc.ban.is_fingerprint_banned(&fp) {
-                        let _ = send_hex_chat(
-                            client,
-                            "&c&lЗАБАНЕН &f» &fВаш отпечаток клиента забанен (твин забаненного аккаунта).",
-                        )
-                        .await;
-                        return Ok(());
-                    }
-                }
-            }
-        }
 
         if is_nbt_packet(id) {
             if !proxy_arc.ddos.check_nbt_packet(peer_ip) {
@@ -943,13 +873,6 @@ async fn handle_all_commands(
     client_protocol: i32,
 ) -> Result<()> {
     let parts: Vec<&str> = cmd.split_whitespace().collect();
-
-        // Продакшен-защита: лимит команд в секунду
-        if !proxy.security.check_command_rate(*uuid) {
-            send_hex_chat(client, "&cСлишком много команд. Подождите.").await.ok();
-            return Ok(());
-        }
-
     if parts.is_empty() {
         return Ok(());
     }
@@ -966,7 +889,6 @@ async fn handle_all_commands(
             if parts.len() < 2 {
                 send_hex_chat(client, "&cИспользование: &f/reg <пароль>").await.ok();
                 return Ok(());
-
             }
             let password = parts[1];
             match proxy.auth.register(username, password) {
@@ -983,7 +905,7 @@ async fn handle_all_commands(
         "/login" | "/l" => {
             if !proxy.permissions.has(username, Permission::CommandLogin) {
                 send_hex_chat(client, "&cНет прав на команду /login.").await.ok();
-                 return Ok(());
+                return Ok(());
             }
             if parts.len() < 2 {
                 send_hex_chat(client, "&cИспользование: &f/login <пароль>").await.ok();
@@ -1019,7 +941,6 @@ async fn handle_all_commands(
                             proxy.players.insert(*uuid, Arc::new(s));
                         }
                         send_hex_chat(client, &format!("&a&lАвторизация &f» &fДобро пожаловать, &e{}", username)).await.ok();
-                        proxy.security.add_player_ip(peer_ip);
 
                         if proxy.config.captcha.enabled
                             && !proxy.captcha.lock().await.is_exempt(uuid, peer_ip)
@@ -1035,10 +956,30 @@ async fn handle_all_commands(
                 }
             }
         }
+        "/logout" => {
+            if !proxy.permissions.has(username, Permission::CommandLogin) {
+                send_hex_chat(client, "&cНет прав на команду /logout.").await.ok();
+                return Ok(());
+            }
+            let new_session = proxy
+                .players
+                .get_mut(uuid)
+                .map(|entry| {
+                    let mut s = (*entry).clone();
+                    s.authenticated = false;
+                    s.login_ip = None;
+                    s
+                });
+            if let Some(s) = new_session {
+                proxy.players.insert(*uuid, Arc::new(s));
+            }
+            send_hex_chat(client, "&c&lВы вышли из аккаунта &f» &fВведите &a/login <пароль> &fдля входа.").await.ok();
+            info!(%username, "logged out");
+        }
         "/tfa" => {
             if !proxy.permissions.has(username, Permission::CommandTfa) {
                 send_hex_chat(client, "&cНет прав на команду /tfa.").await.ok();
-                 return Ok(());
+                return Ok(());
             }
             match parts.get(1) {
                 Some("on") => {
@@ -1072,7 +1013,7 @@ async fn handle_all_commands(
         "/link" => {
             if !proxy.permissions.has(username, Permission::CommandLink) {
                 send_hex_chat(client, "&cНет прав на команду /link.").await.ok();
-                 return Ok(());
+                return Ok(());
             }
             if parts.len() >= 2 {
                 let code = parts[1];
@@ -1086,7 +1027,6 @@ async fn handle_all_commands(
                     }
                 }
             } else {
-                // Запросить код привязки
                 let chat_id_opt = proxy.tfa.lock().await.get_chat_id(username);
                 if let Some(chat_id) = chat_id_opt {
                     match proxy.tfa.lock().await.request_link(chat_id, username.to_string()).await {
@@ -1106,7 +1046,7 @@ async fn handle_all_commands(
         "/captcha" => {
             if !proxy.permissions.has(username, Permission::CommandCaptcha) {
                 send_hex_chat(client, "&cНет прав на команду /captcha.").await.ok();
-                 return Ok(());
+                return Ok(());
             }
             if parts.len() < 2 {
                 send_hex_chat(client, "&cИспользование: &f/captcha <код>").await.ok();
@@ -1137,11 +1077,66 @@ async fn handle_all_commands(
                 }
             }
         }
+        // ═══ Auth команды (tiAuth / baronessauth стиль) ═══
+        "/auth" => {
+            if !proxy.permissions.has(username, Permission::CommandAdmin) {
+                send_hex_chat(client, "&cНет прав на команду /auth.").await.ok();
+                return Ok(());
+            }
+            if parts.len() < 2 {
+                send_hex_chat(client, "&7Использование: &f/auth player <ник> delete &7— удалить аккаунт\\n&7&f/auth player <ник> password <пароль> &7— сменить пароль").await.ok();
+                return Ok(());
+            }
+            match parts[1] {
+                "player" => {
+                    if parts.len() < 3 {
+                        send_hex_chat(client, "&cУкажите ник: &f/auth player <ник> <действие>").await.ok();
+                        return Ok(());
+                    }
+                    let target = parts[2];
+                    match parts.get(3) {
+                        Some("delete") => {
+                            match proxy.auth.reset_account(target) {
+                                Ok(()) => {
+                                    send_hex_chat(client, &format!("&aАккаунт &f{} &aудалён из базы аутентификации.", target)).await.ok();
+                                    info!(%username, "deleted account {}", target);
+                                }
+                                Err(e) => {
+                                    send_hex_chat(client, &format!("&c{}", e)).await.ok();
+                                }
+                            }
+                        }
+                        Some("password") => {
+                            if parts.len() < 5 {
+                                send_hex_chat(client, "&cИспользование: &f/auth player <ник> password <пароль>").await.ok();
+                                return Ok(());
+                            }
+                            let new_password = parts[4];
+                            match proxy.auth.set_password(target, new_password) {
+                                Ok(()) => {
+                                    send_hex_chat(client, &format!("&aПароль для &f{} &aизменён.", target)).await.ok();
+                                    info!(%username, "set password for {}", target);
+                                }
+                                Err(e) => {
+                                    send_hex_chat(client, &format!("&c{}", e)).await.ok();
+                                }
+                            }
+                        }
+                        _ => {
+                            send_hex_chat(client, "&7Действия: &fdelete &7| &fpassword <пароль>").await.ok();
+                        }
+                    }
+                }
+                _ => {
+                    send_hex_chat(client, "&7Использование: &f/auth player <ник> <действие>").await.ok();
+                }
+            }
+        }
         // ═══ BungeeCord команды ═══
         "/server" => {
             if !proxy.permissions.has(username, Permission::CommandServer) {
                 send_hex_chat(client, "&cНет прав на команду /server.").await.ok();
-                 return Ok(());
+                return Ok(());
             }
             if parts.len() < 2 {
                 send_server_list_message(client, proxy);
@@ -1155,7 +1150,7 @@ async fn handle_all_commands(
         "/hub" | "/lobby" => {
             if !proxy.permissions.has(username, Permission::CommandHub) {
                 send_hex_chat(client, "&cНет прав на команду /hub.").await.ok();
-                 return Ok(());
+                return Ok(());
             }
             do_server_switch(
                 client, proxy, username, uuid, "lobby",
@@ -1165,7 +1160,7 @@ async fn handle_all_commands(
         "/find" => {
             if !proxy.permissions.has(username, Permission::CommandFind) {
                 send_hex_chat(client, "&cНет прав на команду /find.").await.ok();
-                 return Ok(());
+                return Ok(());
             }
             if parts.len() < 2 {
                 send_hex_chat(client, "&cИспользование: &f/find <игрок>").await.ok();
@@ -1187,50 +1182,14 @@ async fn handle_all_commands(
         "/serverlist" => {
             if !proxy.permissions.has(username, Permission::CommandServerList) {
                 send_hex_chat(client, "&cНет прав на команду /serverlist.").await.ok();
-                 return Ok(());
-            }
-            send_server_list_message(client, proxy);
-        }
-        "/proxy" => {
-            if !proxy.permissions.has(username, Permission::CommandProxy) {
-                send_hex_chat(client, "&cНет прав на команду /proxy.").await.ok();
-                 return Ok(());
-            }
-            let count = proxy.players.len();
-            let monitor = &proxy.monitor;
-            let servers: Vec<String> = proxy.servers.iter().map(|e| e.key().clone()).collect();
-            send_hex_chat(client, &format!(
-                "&7=== &bRustProxy &7Прокси &7===\n&7Версия: &f{} &7| &7Протоколы: &f754-777\n&7Игроков: &f{} &7| &7TPS: &a{:.1} &7| &7Серверы: &f{}",
-                env!("CARGO_PKG_VERSION"),
-                count,
-                monitor.average_tps(),
-                servers.join(", ")
-            )).await.ok();
-        }
-        "/alert" => {
-            if !proxy.permissions.has(username, Permission::CommandAlert) {
-                send_hex_chat(client, "&cНет прав на команду /alert.").await.ok();
-                 return Ok(());
-            }
-            if parts.len() < 2 {
-                send_hex_chat(client, "&cИспользование: &f/alert <сообщение>").await.ok();
                 return Ok(());
             }
-            let message = parts[1..].join(" ");
-            let payload = serde_json::json!({"text": "", "extra": [
-                serde_json::json!({"text": "&c&lАЛЕРТ &f» &f", "color": "reset"}),
-                serde_json::json!({"text": convert_to_minecraft(&message), "color": "reset"}),
-            ]}).to_string();
-            let pkt = packet_bytes(PLAY_CHAT_MESSAGE_CLIENTBOUND, payload.as_bytes());
-            for entry in proxy.players.iter() {
-                let _ = entry.value().client.lock().await.send(pkt.clone()).await;
-            }
-            send_hex_chat(client, "&aАлерт отправлен всем игрокам.").await.ok();
+            send_server_list_message(client, proxy);
         }
         "/ping" => {
             if !proxy.permissions.has(username, Permission::CommandPing) {
                 send_hex_chat(client, "&cНет прав на команду /ping.").await.ok();
-                 return Ok(());
+                return Ok(());
             }
             let count = proxy.players.len();
             let monitor = &proxy.monitor;
@@ -1245,80 +1204,28 @@ async fn handle_all_commands(
         "/help" => {
             if !proxy.permissions.has(username, Permission::CommandHelp) {
                 send_hex_chat(client, "&cНет прав на команду /help.").await.ok();
-                 return Ok(());
+                return Ok(());
             }
-            send_hex_chat(client, "&7=== &bRustProxy &7Команды &7===\n&f/l <пароль> &7— вход\n&f/reg <пароль> &7— регистрация\n&f/link &7— привязать Telegram\n&f/tfa <on|off|status> &7— 2FA\n&f/captcha <код> &7— капча\n&f/server <имя> &7— перейти на сервер\n&f/hub &7— на лобби\n&f/find <игрок> &7— найти игрока\n&f/serverlist &7— список серверов\n&f/ping &7— пинг прокси\\n&7--- Админ ---\\n&f/admin <ник>|all &7— админ-права\\n&f/ban <ник> [причина] &7— бан + твины\\n&f/unban <ник> &7— разбан\\n&f/banlist &7— список банов\\n&f/twins <ник> &7— твины по отпечатку\\n&f/fingerprint &7— отпечаток клиента\\n&f/perm user <ник> <право> &7— выдать/забрать право\\n&f/resetreg <ник> &7— сброс регистрации").await.ok();
+            send_hex_chat(client, "&7=== &bRustProxy &7Команды &7===\\n&f/l <пароль> &7— вход\\n&f/reg <пароль> &7— регистрация\\n&f/logout &7— выход из аккаунта\\n&f/link &7— привязать Telegram\\n&f/tfa <on|off|status> &7— 2FA\\n&f/captcha <код> &7— капча\\n&f/server <имя> &7— перейти на сервер\\n&f/hub &7— на лобби\\n&f/find <игрок> &7— найти игрока\\n&f/serverlist &7— список серверов\\n&f/ping &7— пинг прокси\\n&7--- Админ ---\\n&f/auth player <ник> delete &7— удалить аккаунт\\n&f/auth player <ник> password <пароль> &7— сменить пароль\\n&f/perm user <ник> <право> &7— выдать право\\n&f/perm user <ник> -<право> &7— забрать право").await.ok();
         }
-        // ═══ Админ-команды (только для админов) ═══
         // ═══ Админ-команды (права доступа) ═══
-        "/admin" => {
-            if !proxy.permissions.has(username, Permission::CommandAdmin) {
-                send_hex_chat(client, "&cНет прав: команда только для админов.").await.ok();
-                 return Ok(());
-            }
-            match parts.get(1) {
-                Some("all") => {
-                    if !proxy.permissions.has(username, Permission::CommandPerm) {
-                        send_hex_chat(client, "&cНет прав на выдачу прав через /perm.").await.ok();
-                         return Ok(());
-                    }
-                    let mut count = 0u32;
-                    for entry in proxy.auth.accounts.iter() {
-                        let acc = entry.value();
-                        proxy.permissions.grant_default(&acc.username);
-                        proxy.permissions.grant(&acc.username, Permission::CommandAlert);
-                        proxy.permissions.grant(&acc.username, Permission::CommandBan);
-                        proxy.permissions.grant(&acc.username, Permission::CommandPerm);
-                        proxy.permissions.grant(&acc.username, Permission::CommandResetReg);
-                        count += 1;
-                    }
-                    send_hex_chat(client, &format!("&aАдмин-права выданы &c{} &fаккаунтам (все).", count)).await.ok();
-                    info!(%username, "admin all: {}", count);
-                }
-                Some(nick) => {
-                    if !proxy.permissions.has(username, Permission::CommandPerm) {
-                        send_hex_chat(client, "&cНет прав на выдачу прав через /perm.").await.ok();
-                         return Ok(());
-                    }
-                    let exists = proxy.auth.account_exists(nick);
-                    proxy.permissions.grant_default(nick);
-                    proxy.permissions.grant(nick, Permission::CommandAlert);
-                    proxy.permissions.grant(nick, Permission::CommandBan);
-                    proxy.permissions.grant(nick, Permission::CommandPerm);
-                    proxy.permissions.grant(nick, Permission::CommandResetReg);
-                    if exists {
-                        send_hex_chat(client, &format!("&aПрава выданы &f{}&a (навсегда).", nick)).await.ok();
-                    } else {
-                        send_hex_chat(client, &format!("&f{} &aустановлен админом (права применятся при первом входе).", nick)).await.ok();
-                    }
-                    info!(%username, "admin set: {}", nick);
-                }
-                None => {
-                    send_hex_chat(client, "&7Использование: &f/admin <ник> &7или &f/admin all").await.ok();
-                }
-            }
-        }
         "/perm" => {
             if !proxy.permissions.has(username, Permission::CommandPerm) {
                 send_hex_chat(client, "&cНет прав на команду /perm.").await.ok();
-                 return Ok(());
-            }
-            if parts.len() < 3 {
-                send_hex_chat(client, "&7Использование: &f/perm user <ник> <право> &7| &f/perm user <ник> -<право>").await.ok();
-                send_hex_chat(client, "&7Права: &fcommand.server command.hub command.login command.register command.link command.tfa command.captcha command.ping command.help command.find command.serverlist command.proxy command.twins command.fingerprint command.alert command.admin command.ban command.perm command.resetreg").await.ok();
-                 return Ok(());
-            }
-            let target = parts[1];
-            let perm_str = parts[2];
-            if target != "user" {
-                send_hex_chat(client, "&cИспользование: &f/perm user <ник> <право>").await.ok();
-                 return Ok(());
+                return Ok(());
             }
             if parts.len() < 4 {
-                send_hex_chat(client, "&cУкажите ник и право: &f/perm user <ник> <право>").await.ok();
-                 return Ok(());
+                send_hex_chat(client, "&7Использование: &f/perm user <ник> <право> &7| &f/perm user <ник> -<право>").await.ok();
+                send_hex_chat(client, "&7Права: &fcommand.server command.hub command.login command.register command.link command.tfa command.captcha command.ping command.help command.find command.serverlist command.proxy command.alert command.admin command.perm").await.ok();
+                return Ok(());
             }
-            let nick = parts[3];
+            let target = parts[1];
+            if target != "user" {
+                send_hex_chat(client, "&cИспользование: &f/perm user <ник> <право>").await.ok();
+                return Ok(());
+            }
+            let nick = parts[2];
+            let perm_str = parts[3];
             let (grant, perm_name) = if perm_str.starts_with('-') {
                 (false, &perm_str[1..])
             } else {
@@ -1339,162 +1246,32 @@ async fn handle_all_commands(
                 }
             }
         }
-        "/resetreg" => {
-            if !proxy.permissions.has(username, Permission::CommandResetReg) {
-                send_hex_chat(client, "&cНет прав на команду /resetreg.").await.ok();
-                 return Ok(());
+        "/alert" => {
+            if !proxy.permissions.has(username, Permission::CommandAlert) {
+                send_hex_chat(client, "&cНет прав на команду /alert.").await.ok();
+                return Ok(());
             }
             if parts.len() < 2 {
-                send_hex_chat(client, "&cИспользование: &f/resetreg <ник>").await.ok();
-                 return Ok(());
+                send_hex_chat(client, "&cИспользование: &f/alert <сообщение>").await.ok();
+                return Ok(());
             }
-            let nick = parts[1];
-            match proxy.auth.reset_account(nick) {
-                Ok(()) => {
-                    proxy.permissions.permissions.remove(nick);
-                    send_hex_chat(client, &format!("&aРегистрация &f{} &aсброшена. Аккаунт удалён.", nick)).await.ok();
-                    info!(%username, "resetreg {}", nick);
-                }
-                Err(e) => {
-                    send_hex_chat(client, &format!("&c{}", e)).await.ok();
-                }
-            }
-        }
-        "/ban" => {
-            if !proxy.permissions.has(username, Permission::CommandBan) {
-                send_hex_chat(client, "&cНет прав на команду /ban.").await.ok();
-                 return Ok(());
-            }
-            if parts.len() < 2 {
-                send_hex_chat(client, "&cИспользование: &f/ban <ник> [причина]").await.ok();
-                 return Ok(());
-            }
-            let nick = parts[1];
-            let reason = if parts.len() > 2 { parts[2..].join(" ") } else { "Нарушение правил".to_string() };
-            proxy.ban.ban_nick(nick, reason.clone(), username.to_string()).ok();
-
-            // Бан по отпечатку, если игрок онлайн — ловим твинов сразу
-            if let Some(entry) = proxy.players.iter().find(|e| e.value().username == nick) {
-                if let Some(fp) = entry.value().fingerprint.as_deref() {
-                    let _ = proxy.ban.ban_fingerprint(fp, format!("твин забаненного аккаунта {}", nick), username.to_string());
-                }
-                let client_link = entry.value().client.clone();
-                let reason_msg = format!("&c&lЗАБАНЕН &f» &c{}\n&7Забанил: &f{}", reason, username);
-                let _ = send_hex_chat_to_link(&client_link, &reason_msg).await;
-            }
-
-            send_hex_chat(client, &format!("&aИгрок &f{} &aзабанен. Причина: &f{}", nick, reason)).await.ok();
-            info!(%username, "banned {}: {}", nick, reason);
-        }
-        "/unban" => {
-            if !proxy.permissions.has(username, Permission::CommandBan) {
-                send_hex_chat(client, "&cНет прав на команду /unban.").await.ok();
-                 return Ok(());
-            }
-            if parts.len() < 2 {
-                send_hex_chat(client, "&cИспользование: &f/unban <ник>").await.ok();
-                 return Ok(());
-            }
-            let nick = parts[1];
-            let ok = proxy.ban.unban_nick(nick);
-            send_hex_chat(client, if ok { &format!("&aИгрок &f{} &aразбанен.", nick) } else { &format!("&cИгрок &f{} &cне был забанен.", nick) }).await.ok();
-        }
-        "/banlist" => {
-            if !proxy.permissions.has(username, Permission::CommandBan) {
-                send_hex_chat(client, "&cНет прав на команду /banlist.").await.ok();
-                 return Ok(());
-            }
-            let bans = proxy.ban.ban_list();
-            let mut lines: Vec<String> = Vec::new();
-            lines.push("&7=== &bБаны &7===".to_string());
-            for b in bans {
-                lines.push(format!("&7{} &f({}) &7— &f{}", b.target, b.reason, b.banned_by));
-            }
-            if bans.is_empty() {
-                lines.push("&7Нет активных банов.".to_string());
-            }
-            send_hex_chat(client, &lines.join("\n")).await.ok();
-        }
-        "/twins" | "/alts" => {
-            if !proxy.permissions.has(username, Permission::CommandTwins) {
-                send_hex_chat(client, "&cНет прав на команду /twins.").await.ok();
-                 return Ok(());
-            }
-            if parts.len() < 2 {
-                send_hex_chat(client, "&cИспользование: &f/twins <ник>").await.ok();
-                 return Ok(());
-            }
-            let nick = parts[1];
-            let mut target_uuid = None;
-            let mut target_fp = None;
+            let message = parts[1..].join(" ");
+            let payload = serde_json::json!({"text": "", "extra": [
+                serde_json::json!({"text": "&c&lАЛЕРТ &f» &f", "color": "reset"}),
+                serde_json::json!({"text": convert_to_minecraft(&message), "color": "reset"}),
+            ]}).to_string();
+            let pkt = packet_bytes(PLAY_CHAT_MESSAGE_CLIENTBOUND, payload.as_bytes());
             for entry in proxy.players.iter() {
-                if entry.value().username == nick {
-                    target_uuid = Some(*entry.key());
-                    target_fp = entry.value().fingerprint.clone();
-                    break;
-                }
+                let _ = entry.value().client.lock().await.send(pkt.clone()).await;
             }
-            let fp = match target_fp {
-                Some(f) => f,
-                None => {
-                    send_hex_chat(client, &format!("&cИгрок &f{} &cне найден онлайн или у него нет отпечатка.", nick)).await.ok();
-                    return Ok(());
-                }
-            };
-            let twins = proxy.ban.twins_for(&target_uuid.unwrap(), &fp);
-            if twins.is_empty() {
-                send_hex_chat(client, &format!("&7Твины для &f{} &7не найдены (уникальный отпечаток).", nick)).await.ok();
-            } else {
-                send_hex_chat(client, &format!("&7Твины &f{} &7(один отпечаток): &f{}", nick, twins.join(", "))).await.ok();
-            }
-        }
-        "/fingerprint" => {
-            if !proxy.permissions.has(username, Permission::CommandFingerprint) {
-                send_hex_chat(client, "&cНет прав на команду /fingerprint.").await.ok();
-                 return Ok(());
-            }
-            let fp = proxy.players.get(uuid)
-                .and_then(|e| e.fingerprint.clone())
-                .unwrap_or_else(|| "ещё не собран".to_string());
-            let brand = proxy.players.get(uuid)
-                .and_then(|e| e.client_brand.clone())
-                .unwrap_or_else(|| "неизвестно".to_string());
-            send_hex_chat(client, &format!(
-                "&7Ваш отпечаток: &f{}\n&7Клиент: &f{}",
-                fp, brand
-            )).await.ok();
+            send_hex_chat(client, "&aАлерт отправлен всем игрокам.").await.ok();
         }
         // Исключены пользователем: /reply /vanish /message /spy
         _ => {
             send_hex_chat(client, "&cНеизвестная команда. &f/help").await.ok();
         }
-        _ => {
-            send_hex_chat(client, "&cНеизвестная команда. &f/help").await.ok();
-        }
     }
     Ok(())
-}
-
-/// Отправить чат-сообщение по готовой ClientLink (для бан-рассылки онлайн-игроку).
-pub async fn send_hex_chat_to_link(link: &ClientLink, text: &str) -> Result<()> {
-    let formatted = format_message(text);
-    let mut c = link.lock().await;
-    c.send(packet_bytes(PLAY_CHAT_MESSAGE_CLIENTBOUND, formatted.as_bytes())).await
-}
-
-/// Извлечь бренд клиента из плагин-сообщения minecraft:brand / MC|Brand.
-fn extract_client_brand(body: &[u8]) -> Option<String> {
-    use crate::protocol::varint::read_string;
-    let (chan_n, channel) = read_string(body)?;
-    let rest = &body[chan_n..];
-    if channel == "minecraft:brand" || channel == "MC|Brand" {
-        if let Some((_, brand)) = read_string(rest) {
-            if !brand.is_empty() {
-                return Some(brand);
-            }
-        }
-    }
-    None
 }
 
 /// Переключение сервера (/server, /hub, /lobby).
@@ -1511,7 +1288,6 @@ async fn do_server_switch(
     info!(%username, target = %name, "server switch requested");
     proxy.metrics.inc_server_switches();
 
-    // Останавливаем старый backend→client цикл
     let _ = std::mem::replace(abort_tx, None);
 
     let new_link = proxy.connect_to_server(name, client_protocol, &LoginStart {
@@ -1521,7 +1297,6 @@ async fn do_server_switch(
     let new_server_protocol = new_link.protocol;
     let mut framed = new_link.framed;
 
-    // Релей логин-фазы на новый бэкенд
     {
         let mut c = client.lock().await;
         relay_login_phase(&mut c, &mut framed, proxy, &LoginStart {
@@ -1536,7 +1311,6 @@ async fn do_server_switch(
         proxy.players.insert(*uuid, Arc::new(new_session));
     }
 
-    // Запускаем новый backend→client цикл
     let (abort_tx2, abort_rx2) = mpsc::unbounded_channel::<()>();
     *abort_tx = Some(abort_tx2);
     let b_client = Arc::clone(client);
@@ -1610,7 +1384,7 @@ fn build_auth_required_message(username: &str) -> String {
     ))
 }
 
-/// Приветственное сообщение (после авторизации) с кликабельными [connect].
+/// Приветственное сообщение (после авторизации).
 fn build_welcome_message(username: &str) -> String {
     format_message(&format!(
         "&a&lАвторизация &f» &fДобро пожаловать, &e{}\n\
@@ -1626,6 +1400,12 @@ fn build_welcome_message(username: &str) -> String {
 
 fn is_nbt_packet(id: i32) -> bool {
     matches!(id, 0x11 | 0x12 | 0x18 | 0x2D | 0x2E)
+}
+
+pub async fn send_hex_chat_to_link(link: &ClientLink, text: &str) -> Result<()> {
+    let formatted = format_message(text);
+    let mut c = link.lock().await;
+    c.send(packet_bytes(PLAY_CHAT_MESSAGE_CLIENTBOUND, formatted.as_bytes())).await
 }
 
 async fn send_hex_chat(client: &ClientLink, text: &str) -> Result<()> {
