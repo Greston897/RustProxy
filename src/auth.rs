@@ -16,6 +16,14 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
+/// Режим аутентификации.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthMode {
+    Offline,
+    Online,
+    Microsoft,
+}
+
 /// Профиль игрока (Mojang-стиль).
 #[derive(Debug, Clone)]
 pub struct PlayerProfile {
