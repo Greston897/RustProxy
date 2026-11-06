@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio::select;
-use tokio::stream::StreamExt;
+use tokio_stream::StreamExt;
 use tokio::sync::mpsc;
 use tokio::time;
 use tokio_util::codec::Framed;

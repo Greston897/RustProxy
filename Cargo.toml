@@ -9,7 +9,7 @@ repository = "https://github.com/Greston897/RustProxy"
 
 [dependencies]
 # Async runtime — multi-threaded, все ядра контейнера
-tokio = { version = "1", features = ["full", "rt-multi-thread", "macros", "time", "stream"] }
+tokio = { version = "1", features = ["full", "rt-multi-thread", "macros", "time"] }
 tokio-util = { version = "0.7", features = ["codec"] }
 bytes = "1.8"
 
@@ -22,6 +22,9 @@ toml = "0.8"
 # Сериализация
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+# StreamExt для Framed (tokio::stream может не быть в reciente версиях)
+tokio-stream = "0.1"
 
 # Ошибки
 anyhow = "1"
