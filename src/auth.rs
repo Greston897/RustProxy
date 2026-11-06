@@ -214,7 +214,7 @@ impl AuthManager {
     /// Сбросить регистрацию аккаунта (удаляет аккаунт完全).
     pub fn reset_account(&self, username: &str) -> Result<()> {
         if !self.accounts.contains_key(username) {
-            bail!(\"Аккаунт не найден.\");
+            bail!("Аккаунт не найден.");
         }
         self.accounts.remove(username);
         // Удаляем обратную связь UUID→username
