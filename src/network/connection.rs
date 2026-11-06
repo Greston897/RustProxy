@@ -96,7 +96,7 @@ pub async fn handle_connection(
     match handshake.next_state {
         1 => handle_status(&mut client, &config, peer, &proxy).await?,
         2 => {
-            handle_login(&mut client, handshake.protocol_version, config, proxy, peer).await?
+            handle_login(&mut client, handshake.protocol_version, config, proxy, peer, peer_ip).await?
         }
         other => bail!("unsupported next state {other}"),
     }
@@ -150,6 +150,7 @@ async fn handle_login(
     config: Arc<ProxyConfig>,
     proxy: Arc<Proxy>,
     peer: SocketAddr,
+    peer_ip: IpAddr,
 ) -> Result<()> {
     // 1. Login Start
     let packet = read_next_with_timeout(client, config.proxy.read_timeout_secs).await?
