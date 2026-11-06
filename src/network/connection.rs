@@ -704,7 +704,7 @@ async fn client_to_backend_loop_auth(
             }
             handle_all_commands(
                 &client, &proxy_arc, &username, &session.profile.uuid, &cmd, peer_ip,
-                abort_tx, &server_name, client_protocol,
+                abort_tx, &server_name, client_protocol, server_protocol,
             ).await?;
             continue;
         }
@@ -816,7 +816,7 @@ async fn client_to_backend_loop_cached(
             }
             handle_all_commands(
                 &client, &proxy_arc, &username, &uuid, &cmd, peer_ip,
-                abort_tx, &server_name, client_protocol,
+                abort_tx, &server_name, client_protocol, server_protocol,
             ).await?;
             continue;
         }
@@ -893,6 +893,7 @@ async fn handle_all_commands(
     abort_tx: &mut Option<mpsc::UnboundedSender<()>>,
     current_server: &str,
     client_protocol: i32,
+    server_protocol: i32,
 ) -> Result<()> {
     let parts: Vec<&str> = cmd.split_whitespace().collect();
     if parts.is_empty() {

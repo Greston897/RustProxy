@@ -13,8 +13,7 @@
 
 use anyhow::{bail, Result};
 use aes::Aes128;
-use cipher::{KeyInit, BlockSizeUser};
-use cipher::block_encryptor::BlockEncryptor;
+use cipher::{BlockEncryptor, KeyInit, BlockSizeUser};
 use cipher::generic_array::GenericArray;
 use rand::RngCore;
 use rsa::{RsaPrivateKey, RsaPublicKey, Pkcs1v15Encrypt};
