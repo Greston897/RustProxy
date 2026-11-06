@@ -1,7 +1,157 @@
 //! # Система прав доступа (permissions) для команд
-//!\n//!\n//! Права выдаются на каждую команду отдельно игроку.\n//! Базовый набор выдаётся всем при регистрации.\n//!\n//! Базовые права (у всех по умолчанию):\n//!   command.server   — /server, /hub, /lobby\n//!   command.login    — /login /l, /logout\n//!   command.register — /reg /register\n//!   command.link     — /link\n//!   command.tfa      — /tfa\n//!   command.captcha  — /captcha\n//!   command.ping     — /ping\n//!   command.help     — /help\n//!   command.find     — /find\n//!   command.serverlist — /serverlist\n//!   command.proxy    — /proxy\n//!\n//! Админские права (только по назначению через /perm):\n//!   command.alert    — /alert\n//!   command.admin    — /auth (управление аккаунтами)\n//!   command.perm     — /perm (выдача прав)\n\nuse dashmap::DashMap;\nuse std::collections::HashSet;\n\n#[derive(Debug, Clone, PartialEq, Eq, Hash)]\npub enum Permission {\n    CommandServer,\n    CommandHub,\n    CommandLogin,\n    CommandRegister,\n    CommandLink,\n    CommandTfa,\n    CommandCaptcha,\n    CommandPing,\n    CommandHelp,\n    CommandFind,\n    CommandServerList,\n    CommandProxy,\n    CommandAlert,\n    CommandAdmin,\n    CommandPerm,\n}\n\nimpl Permission {\n    pub fn as_str(&self) -> &'static str {\n        match self {\n            Permission::CommandServer => \"command.server\",\n            Permission::CommandHub => \"command.hub\",\n            Permission::CommandLogin => \"command.login\",\n            Permission::CommandRegister => \"command.register\",\n            Permission::CommandLink => \"command.link\",\n            Permission::CommandTfa => \"command.tfa\",\n            Permission::CommandCaptcha => \"command.captcha\",\n            Permission::CommandPing => \"command.ping\",\n            Permission::CommandHelp => \"command.help\",\n            Permission::CommandFind => \"command.find\",\n            Permission::CommandServerList => \"command.serverlist\",\n            Permission::CommandProxy => \"command.proxy\",\n            Permission::CommandAlert => \"command.alert\",\n            Permission::CommandAdmin => \"command.admin\",\n            Permission::CommandPerm => \"command.perm\",\n        }\n    }\n\n    pub fn from_str(s: &str) -> Option<Self> {\n        match s {\n            \"command.server\" => Some(Self::CommandServer),\n            \"command.hub\" => Some(Self::CommandHub),\n            \"command.login\" => Some(Self::CommandLogin),\n            \"command.register\" => Some(Self::CommandRegister),\n            \"command.link\" => Some(Self::CommandLink),\n            \"command.tfa\" => Some(Self::CommandTfa),\n            \"command.captcha\" => Some(Self::CommandCaptcha),\n            \"command.ping\" => Some(Self::CommandPing),\n            \"command.help\" => Some(Self::CommandHelp),\n            \"command.find\" => Some(Self::CommandFind),\n            \"command.serverlist\" => Some(Self::CommandServerList),\n            \"command.proxy\" => Some(Self::CommandProxy),\n            \"command.alert\" => Some(Self::CommandAlert),\n            \"command.admin\" => Some(Self::CommandAdmin),\n            \"command.perm\" => Some(Self::CommandPerm),\n            _ => None,\n        }\n    }\n}\n\n/// Базовый набор прав — выдаётся всем аккаунтам при регистрации.\npub fn default_permissions() -> HashSet<Permission> {\n    let mut set = HashSet::new();\n    set.insert(Permission::CommandServer);\n    set.insert(Permission::CommandHub);\n    set.insert(Permission::CommandLogin);\n    set.insert(Permission::CommandRegister);\n    set.insert(Permission::CommandLink);\n    set.insert(Permission::CommandTfa);\n    set.insert(Permission::CommandCaptcha);\n    set.insert(Permission::CommandPing);\n    set.insert(Permission::CommandHelp);\n    set.insert(Permission::CommandFind);\n    set.insert(Permission::CommandServerList);\n    set.insert(Permission::CommandProxy);\n    set\n}
+//!
+//! Права выдаются на каждую команду отдельно игроку.
+//! Базовый набор выдаётся всем при регистрации.
+//!
+//! Базовые права (у всех по умолчанию):
+//!   command.server   — /server, /hub, /lobby
+//!   command.login    — /login /l, /logout
+//!   command.register — /reg /register
+//!   command.link     — /link
+//!   command.tfa      — /tfa
+//!   command.captcha  — /captcha
+//!   command.ping     — /ping
+//!   command.help     — /help
+//!   command.find     — /find
+//!   command.serverlist — /serverlist
+//!   command.proxy    — /proxy
+//!
+//! Админские права (только по назначению через /perm):
+//!   command.alert    — /alert
+//!   command.admin    — /auth (управление аккаунтами)
+//!   command.perm     — /perm (выдача прав)
 
-/// Менеджер прав.\npub struct PermissionManager {\n    /// username → набор прав\n    pub permissions: DashMap<String, HashSet<Permission>>,\n}\n\nimpl PermissionManager {\n    pub fn new() -> Self {\n        Self { permissions: DashMap::new() }\n    }\n\n    /// Выдать право игроку.\n    pub fn grant(&self, username: &str, perm: Permission) {\n        self.permissions.entry(username.to_string()).or_default().insert(perm);\n    }\n\n    /// Забрать право у игрока.\n    pub fn revoke(&self, username: &str, perm: Permission) {\n        if let Some(perms) = self.permissions.get_mut(username) {\n            perms.remove(&perm);\n        }\n    }\n\n    /// Выдать базовые права при регистрации.\n    pub fn grant_default(&self, username: &str) {\n        for perm in default_permissions() {\n            self.permissions.entry(username.to_string()).or_default().insert(perm);\n        }\n    }\n\n    /// Проверить, есть ли право.\n    pub fn has(&self, username: &str, perm: Permission) -> bool {\n        self.permissions.get(username).map(|p| p.contains(perm)).unwrap_or(false)\n    }\n\n    /// Получить все права игрока.\n    pub fn get(&self, username: &str) -> HashSet<Permission> {\n        self.permissions.get(username).map(|p| p.clone()).unwrap_or_default()\n    }\n\n    /// Список игроков с конкретным правом.\n    pub fn players_with(&self, perm: Permission) -> Vec<String> {\n        self.permissions.iter().filter(|e| e.value().contains(&perm)).map(|e| e.key().clone()).collect()\n    }\n}
+use dashmap::DashMap;
+use std::collections::HashSet;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Permission {
+    CommandServer,
+    CommandHub,
+    CommandLogin,
+    CommandRegister,
+    CommandLink,
+    CommandTfa,
+    CommandCaptcha,
+    CommandPing,
+    CommandHelp,
+    CommandFind,
+    CommandServerList,
+    CommandProxy,
+    CommandAlert,
+    CommandAdmin,
+    CommandPerm,
+}
+
+impl Permission {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Permission::CommandServer => "command.server",
+            Permission::CommandHub => "command.hub",
+            Permission::CommandLogin => "command.login",
+            Permission::CommandRegister => "command.register",
+            Permission::CommandLink => "command.link",
+            Permission::CommandTfa => "command.tfa",
+            Permission::CommandCaptcha => "command.captcha",
+            Permission::CommandPing => "command.ping",
+            Permission::CommandHelp => "command.help",
+            Permission::CommandFind => "command.find",
+            Permission::CommandServerList => "command.serverlist",
+            Permission::CommandProxy => "command.proxy",
+            Permission::CommandAlert => "command.alert",
+            Permission::CommandAdmin => "command.admin",
+            Permission::CommandPerm => "command.perm",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "command.server" => Some(Self::CommandServer),
+            "command.hub" => Some(Self::CommandHub),
+            "command.login" => Some(Self::CommandLogin),
+            "command.register" => Some(Self::CommandRegister),
+            "command.link" => Some(Self::CommandLink),
+            "command.tfa" => Some(Self::CommandTfa),
+            "command.captcha" => Some(Self::CommandCaptcha),
+            "command.ping" => Some(Self::CommandPing),
+            "command.help" => Some(Self::CommandHelp),
+            "command.find" => Some(Self::CommandFind),
+            "command.serverlist" => Some(Self::CommandServerList),
+            "command.proxy" => Some(Self::CommandProxy),
+            "command.alert" => Some(Self::CommandAlert),
+            "command.admin" => Some(Self::CommandAdmin),
+            "command.perm" => Some(Self::CommandPerm),
+            _ => None,
+        }
+    }
+}
+
+/// Базовый набор прав — выдаётся всем аккаунтам при регистрации.
+pub fn default_permissions() -> HashSet<Permission> {
+    let mut set = HashSet::new();
+    set.insert(Permission::CommandServer);
+    set.insert(Permission::CommandHub);
+    set.insert(Permission::CommandLogin);
+    set.insert(Permission::CommandRegister);
+    set.insert(Permission::CommandLink);
+    set.insert(Permission::CommandTfa);
+    set.insert(Permission::CommandCaptcha);
+    set.insert(Permission::CommandPing);
+    set.insert(Permission::CommandHelp);
+    set.insert(Permission::CommandFind);
+    set.insert(Permission::CommandServerList);
+    set.insert(Permission::CommandProxy);
+    set
+}
+
+/// Менеджер прав.
+pub struct PermissionManager {
+    /// username → набор прав
+    pub permissions: DashMap<String, HashSet<Permission>>,
+}
+
+impl PermissionManager {
+    pub fn new() -> Self {
+        Self { permissions: DashMap::new() }
+    }
+
+    /// Выдать право игроку.
+    pub fn grant(&self, username: &str, perm: Permission) {
+        self.permissions.entry(username.to_string()).or_default().insert(perm);
+    }
+
+    /// Забрать право у игрока.
+    pub fn revoke(&self, username: &str, perm: Permission) {
+        if let Some(perms) = self.permissions.get_mut(username) {
+            perms.remove(&perm);
+        }
+    }
+
+    /// Выдать базовые права при регистрации.
+    pub fn grant_default(&self, username: &str) {
+        for perm in default_permissions() {
+            self.permissions.entry(username.to_string()).or_default().insert(perm);
+        }
+    }
+
+    /// Проверить, есть ли право.
+    pub fn has(&self, username: &str, perm: Permission) -> bool {
+        self.permissions.get(username).map(|p| p.contains(perm)).unwrap_or(false)
+    }
+
+    /// Получить все права игрока.
+    pub fn get(&self, username: &str) -> HashSet<Permission> {
+        self.permissions.get(username).map(|p| p.clone()).unwrap_or_default()
+    }
+
+    /// Список игроков с конкретным правом.
+    pub fn players_with(&self, perm: Permission) -> Vec<String> {
+        self.permissions.iter()
+            .filter(|e| e.value().contains(&perm))
+            .map(|e| e.key().clone())
+            .collect()
+    }
+}
 
 impl Default for PermissionManager {
     fn default() -> Self {
@@ -14,9 +164,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_and_grant() {
+    fn permission_grant_revoke() {
         let mgr = PermissionManager::new();
-        mgr.grant_default("player");
         assert!(mgr.has("player", Permission::CommandServer));
         assert!(!mgr.has("player", Permission::CommandAdmin));
 
