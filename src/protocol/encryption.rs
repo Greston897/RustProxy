@@ -104,7 +104,7 @@ impl ServerKeyPair {
     pub fn decrypt_shared_secret(&self, encrypted: &[u8]) -> Result<Vec<u8>> {
         let mut rng = rand::thread_rng();
         self.private
-            .decrypt(Pkcs1v15Encrypt, &mut rng, encrypted)
+            .decrypt(Pkcs1v15Encrypt, encrypted)
             .map_err(|e| anyhow::anyhow!("RSA decrypt failed: {e}"))
     }
 }
@@ -158,7 +158,7 @@ pub fn parse_spki_public_key(der: &[u8]) -> Result<RsaPublicKey> {
 pub fn encrypt_with_public_key(public_key: &RsaPublicKey, secret: &[u8]) -> Result<Vec<u8>> {
     let mut rng = rand::thread_rng();
     public_key
-        .encrypt(&mut rng, Pkcs1v15Encrypt, secret)
+        .encrypt(Pkcs1v15Encrypt, secret)
         .map_err(|e| anyhow::anyhow!("RSA encrypt failed: {e}"))
 }
 
