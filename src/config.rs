@@ -491,7 +491,7 @@ pub fn t(&self, key: &str, replacements: &[(&str, &str)]) -> String {
         result = result.replace(&format!("{{{}}}", placeholder), value);
     }
     crate::messages::format_message(&result)
-}
+    }
 
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
         let text = std::fs::read_to_string(path)
