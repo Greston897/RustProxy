@@ -493,8 +493,9 @@ impl ProxyConfig {
     }
 
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let text = std::fs::read_to_string(path)
-            .with_context(|| format!("failed to read config {:?}", path.as_ref().display()))?;
+        let path_str = path.as_ref().to_string_lossy().to_string();
+        let text = std::fs::read_to_string(&path)
+            .with_context(|| format!("failed to read config {:?}", path_str))?;
         let cfg: ProxyConfig = toml::from_str(&text).context("failed to parse config.toml")?;
         Ok(cfg)
     }
