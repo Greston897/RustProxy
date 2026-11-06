@@ -41,21 +41,27 @@ jobs:
         shell: bash
         run: |
           cargo build --release > build.log 2>&1 || {
+            sed -e 's/\x1b\[[0-9;]*m//g' build.log > build.clean.log
             {
               echo '## cargo build --release FAILED'
               echo ''
               echo '```'
-              grep -E '^(error|warning: unused)' build.log | head -60
+              grep -n -E -A6 '^error' build.clean.log | head -300
               echo '--- tail build.log ---'
-              tail -n 150 build.log
+              tail -n 80 build.clean.log
               echo '```'
             } >> "$GITHUB_STEP_SUMMARY"
-            grep -E '^error' build.log | head -10 | while IFS= read -r line; do
-              esc=$(printf '%s' "$line" | sed -e 's/%/%25/g' -e 's/\r/%0D/g' -e 's/\n/%0A/g')
-              echo "::error::$esc"
+            # Одна большая аннотация с блоками ошибок (видна через check-runs API)
+            MSG=$(grep -E -A6 '^error' build.clean.log | head -c 6000 | sed -e 's/%/%25/g' -e 's/\r/%0D/g' -e ':a;N;$!ba;s/\n/%0A/g')
+            echo "::error::$MSG"
+            # По одному annotations на каждую строку-локацию rustc (file:line)
+            grep -E '^[[:space:]]+--> ' build.clean.log | head -8 | while IFS= read -r loc; do
+              path=$(printf '%s' "$loc" | sed -E 's/.*-->[[:space:]]*([^:]+):.*/\1/' | tr -d ' ')
+              line=$(printf '%s' "$loc" | grep -oE ':[0-9]+:[0-9]+' | head -1 | cut -d: -f2)
+              if [ -n "$path" ] && [ -n "$line" ]; then
+                echo "::error file=$path,line=$line::see build error details"
+              fi
             done
-            echo '----- build.log tail -----'
-            tail -n 40 build.log
             exit 1
           }
 
