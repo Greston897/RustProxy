@@ -38,7 +38,26 @@ jobs:
           key: ${{ runner.os }}-cargo-target-v3-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Build release
-        run: cargo build --release
+        shell: bash
+        run: |
+          cargo build --release > build.log 2>&1 || {
+            {
+              echo '## cargo build --release FAILED'
+              echo ''
+              echo '```'
+              grep -E '^(error|warning: unused)' build.log | head -60
+              echo '--- tail build.log ---'
+              tail -n 150 build.log
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            grep -E '^error' build.log | head -10 | while IFS= read -r line; do
+              esc=$(printf '%s' "$line" | sed -e 's/%/%25/g' -e 's/\r/%0D/g' -e 's/\n/%0A/g')
+              echo "::error::$esc"
+            done
+            echo '----- build.log tail -----'
+            tail -n 40 build.log
+            exit 1
+          }
 
       - name: Show release binary size
         run: ls -lh target/release/rustproxy
