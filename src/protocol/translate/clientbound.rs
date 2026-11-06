@@ -187,19 +187,19 @@ pub fn parse_clientbound(id: i32, data: &[u8], version: &ProtocolVersion) -> Res
         v if id == version.play_entity_velocity_id => parse_entity_velocity(data),
         v if id == version.play_entity_position_id => parse_entity_position(data),
         v if id == version.play_entity_look_id => parse_entity_look(data),
-        v if id == version.play_entity_position_and_look_id => {
+        _ if id == version.play_entity_position_and_look_id => {
             parse_entity_position_and_look(data)
         }
-        v if id == version.play_entity_teleport_id => parse_entity_teleport(data),
-        v if id == version.play_destroy_entities_id => parse_destroy_entities(data),
-        v if id == version.play_block_change_id => parse_block_change(data),
-        v if id == version.play_chunk_data_id => parse_chunk_data(data),
-        v if id == version.play_spawn_object_id => parse_spawn_object(data),
-        v if id == version.play_spawn_mob_id => parse_spawn_mob(data),
-        v if id == version.play_spawn_player_id => parse_spawn_player(data),
-        v if id == version.play_multi_block_change_id => parse_multi_block_change(data),
-        v if id == version.play_plugin_message_id => parse_plugin_message(data),
-        v if id == version.play_custom_payload_id => parse_custom_payload(data),
+        _ if id == version.play_entity_teleport_id => parse_entity_teleport(data),
+        _ if id == version.play_destroy_entities_id => parse_destroy_entities(data),
+        _ if id == version.play_block_change_id => parse_block_change(data),
+        _ if id == version.play_chunk_data_id => parse_chunk_data(data),
+        _ if id == version.play_spawn_object_id => parse_spawn_object(data),
+        _ if id == version.play_spawn_mob_id => parse_spawn_mob(data),
+        _ if id == version.play_spawn_player_id => parse_spawn_player(data),
+        _ if id == version.play_multi_block_change_id => parse_multi_block_change(data),
+        _ if id == version.play_plugin_message_id => parse_plugin_message(data),
+        _ if id == version.play_custom_payload_id => parse_custom_payload(data),
         _ => Ok(PacketIR::Raw { id, data: data.to_vec() }),
     }
 }
