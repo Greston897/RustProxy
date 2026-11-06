@@ -346,7 +346,7 @@ async fn handle_play_full(
     );
 
     // Сообщение: нужна авторизация
-    let auth_msg = build_auth_required_message(&username);
+    let auth_msg = build_auth_required_message(&config, &username);
     {
         let mut c = client.lock().await;
         c.send(packet_bytes(
@@ -424,7 +424,7 @@ async fn handle_play_cached(
     proxy.players.insert(uuid, Arc::new(ps));
 
     // Приветствие
-    let welcome = build_welcome_message(&username);
+    let welcome = build_welcome_message(&config, &username);
     {
         let mut c = client.lock().await;
         c.send(packet_bytes(
@@ -698,7 +698,7 @@ async fn client_to_backend_loop_auth(
         if let Some(cmd) = parse_proxy_command(&pkt) {
             // Продакшен-защита: лимит команд в секунду
             if !proxy_arc.security.check_command_rate(session.profile.uuid) {
-                send_hex_chat(client, "&cСлишком много команд. Подождите.").await.ok();
+                send_hex_chat(client, &proxy.config.t("no_permission", &[])).await.ok();
                 continue;
             }
             handle_all_commands(
@@ -810,7 +810,7 @@ async fn client_to_backend_loop_cached(
 
         if let Some(cmd) = parse_proxy_command(&pkt) {
             if !proxy_arc.security.check_command_rate(uuid) {
-                send_hex_chat(client, "&cСлишком много команд. Подождите.").await.ok();
+                send_hex_chat(client, &proxy.config.t("no_permission", &[])).await.ok();
                 continue;
             }
             handle_all_commands(
@@ -904,18 +904,18 @@ async fn handle_all_commands(
         // ═══ Авторизация ═══
         "/reg" | "/register" => {
             if !proxy.permissions.has(username, Permission::CommandRegister) {
-                send_hex_chat(client, "&cНет прав на команду /reg.").await.ok();
+                send_hex_chat(client, &proxy.config.t("no_permission", &[])).await.ok();
                 return Ok(());
             }
             if parts.len() < 2 {
-                send_hex_chat(client, "&cИспользование: &f/reg <пароль>").await.ok();
+                send_hex_chat(client, &proxy.config.t("help_cmd_register", &[])).await.ok();
                 return Ok(());
             }
             let password = parts[1];
             match proxy.auth.register(username, password) {
                 Ok(_) => {
                     proxy.permissions.grant_default(username);
-                    send_hex_chat(client, "&a&lРегистрация &f» &fАккаунт создан. Теперь &a/login <пароль>").await.ok();
+                    send_hex_chat(client, &proxy.config.t("registered", &[])).await.ok();
                     info!(%username, "registered new account");
                 }
                 Err(e) => {
@@ -925,11 +925,11 @@ async fn handle_all_commands(
         }
         "/login" | "/l" => {
             if !proxy.permissions.has(username, Permission::CommandLogin) {
-                send_hex_chat(client, "&cНет прав на команду /login.").await.ok();
+                send_hex_chat(client, &proxy.config.t("no_permission", &[])).await.ok();
                 return Ok(());
             }
             if parts.len() < 2 {
-                send_hex_chat(client, "&cИспользование: &f/login <пароль>").await.ok();
+                send_hex_chat(client, &proxy.config.t("help_cmd_login", &[])).await.ok();
                 return Ok(());
             }
             let password = parts[1];
@@ -943,9 +943,9 @@ async fn handle_all_commands(
                         if let Some(acc) = account {
                             if let Some(chat_id) = acc.tg_chat_id.or(proxy.tfa.lock().await.get_chat_id(username)) {
                                 let _ = proxy.tfa.lock().await.request_login_confirm(*uuid, username, peer_ip, chat_id).await;
-                                send_hex_chat(client, "&b&l2FA &f» &fЗапрос подтверждения отправлен в Telegram. Ответьте &a/da &fили &c/net &fв боте.").await.ok();
+                                send_hex_chat(client, &proxy.config.t("tfa_confirm_sent", &[])).await.ok();
                             } else {
-                                send_hex_chat(client, "&c2FA включён, но Telegram не привязан. Обратитесь к администрации.").await.ok();
+                                send_hex_chat(client, &proxy.config.t("tfa_not_linked", &[])).await.ok();
                             }
                         }
                     } else {
@@ -954,7 +954,7 @@ async fn handle_all_commands(
                             sess.authenticated = true;
                             sess.login_ip = Some(peer_ip);
                         }
-                        send_hex_chat(client, &format!("&a&lАвторизация &f» &fДобро пожаловать, &e{}", username)).await.ok();
+                        send_hex_chat(client, &proxy.config.t("login_success", &[("player", username)])).await.ok();
 
                         if proxy.config.captcha.enabled
                             && !proxy.captcha.lock().await.is_exempt(uuid, peer_ip)
@@ -972,7 +972,7 @@ async fn handle_all_commands(
         }
         "/logout" => {
             if !proxy.permissions.has(username, Permission::CommandLogin) {
-                send_hex_chat(client, "&cНет прав на команду /logout.").await.ok();
+                send_hex_chat(client, &proxy.config.t("no_permission", &[])).await.ok();
                 return Ok(());
             }
             if let Some(mut entry) = proxy.players.get_mut(uuid) {
@@ -980,53 +980,52 @@ async fn handle_all_commands(
                 sess.authenticated = false;
                 sess.login_ip = None;
             }
-            send_hex_chat(client, "&c&lВы вышли из аккаунта &f» &fВведите &a/login <пароль> &fдля входа.").await.ok();
+            send_hex_chat(client, &proxy.config.t("logged_out", &[])).await.ok();
             info!(%username, "logged out");
         }
         "/tfa" => {
             if !proxy.permissions.has(username, Permission::CommandTfa) {
-                send_hex_chat(client, "&cНет прав на команду /tfa.").await.ok();
+                send_hex_chat(client, &proxy.config.t("no_permission", &[])).await.ok();
                 return Ok(());
             }
             match parts.get(1) {
                 Some("on") => {
                     if proxy.tfa.lock().await.is_linked(username) {
                         let _ = proxy.tfa.lock().await.toggle_tfa(username, true);
-                        send_hex_chat(client, "&a&l2FA &f» &fПодтверждение входа включено.").await.ok();
+                        send_hex_chat(client, &proxy.config.t("tfa_on", &[])).await.ok();
                     } else {
-                        send_hex_chat(client, "&cСначала привяжите Telegram: &f/link").await.ok();
+                        send_hex_chat(client, &proxy.config.t("tfa_link_first", &[])).await.ok();
                     }
                 }
                 Some("off") => {
                     let _ = proxy.tfa.lock().await.toggle_tfa(username, false);
-                    send_hex_chat(client, "&c&l2FA &f» &fПодтверждение входа отключено (привязка остаётся).").await.ok();
+                    send_hex_chat(client, &proxy.config.t("tfa_off", &[])).await.ok();
                 }
                 Some("status") => {
                     let linked = proxy.tfa.lock().await.is_linked(username);
                     let enabled = proxy.auth.get_account(username)
                         .map(|a| a.tfa_enabled).unwrap_or(false);
-                    send_hex_chat(client, &format!(
-                        "&7TFA: &fПривязано: {}\n&72FA: &f{}",
-                        if linked { "&aДа" } else { "&cНет" },
-                        if enabled { "&aВкл" } else { "&cВыкл" }
-                    )).await.ok();
+                    send_hex_chat(client, &proxy.config.t("tfa_status", &[
+                        ("linked", if linked { "&aДа" } else { "&cНет" }),
+                        ("enabled", if enabled { "&aВкл" } else { "&cВыкл" }),
+                    ])).await.ok();
                 }
                 _ => {
-                    send_hex_chat(client, "&7TFA команды: &f/tfa on &7| &f/tfa off &7| &f/tfa status").await.ok();
+                    send_hex_chat(client, &proxy.config.t("tfa_help", &[])).await.ok();
                 }
             }
         }
         // ═══ TFA /link ═══
         "/link" => {
             if !proxy.permissions.has(username, Permission::CommandLink) {
-                send_hex_chat(client, "&cНет прав на команду /link.").await.ok();
+                send_hex_chat(client, &proxy.config.t("no_permission", &[])).await.ok();
                 return Ok(());
             }
             if parts.len() >= 2 {
                 let code = parts[1];
                 match proxy.tfa.lock().await.verify_link(code, *uuid, username) {
                     Ok(chat_id) => {
-                        send_hex_chat(client, &format!("&a&lTelegram &f» &fПривязан к чату &a{}", chat_id)).await.ok();
+                        send_hex_chat(client, &proxy.config.t("link_success", &[("chat_id", &chat_id.to_string())])).await.ok();
                         info!(%username, "TG linked to {}", chat_id);
                     }
                     Err(e) => {
@@ -1038,25 +1037,25 @@ async fn handle_all_commands(
                 if let Some(chat_id) = chat_id_opt {
                     match proxy.tfa.lock().await.request_link(chat_id, username.to_string()).await {
                         Ok(_) => {
-                            send_hex_chat(client, "&a&lTelegram &f» &fКод привязки отправлен в бота. Введите &f/link <код>").await.ok();
+                            send_hex_chat(client, &proxy.config.t("link_code_sent", &[])).await.ok();
                         }
                         Err(e) => {
                             send_hex_chat(client, &format!("&cОшибка отправки кода: {}", e)).await.ok();
                         }
                     }
                 } else {
-                    send_hex_chat(client, "&cTelegram не привязан к аккаунту. Обратитесь к администрации.").await.ok();
+                    send_hex_chat(client, &proxy.config.t("link_not_linked", &[])).await.ok();
                 }
             }
         }
         // ═══ CAPTCHA ═══
         "/captcha" => {
             if !proxy.permissions.has(username, Permission::CommandCaptcha) {
-                send_hex_chat(client, "&cНет прав на команду /captcha.").await.ok();
+                send_hex_chat(client, &proxy.config.t("no_permission", &[])).await.ok();
                 return Ok(());
             }
             if parts.len() < 2 {
-                send_hex_chat(client, "&cИспользование: &f/captcha <код>").await.ok();
+                send_hex_chat(client, &proxy.config.t("captcha_usage", &[])).await.ok();
                 return Ok(());
             }
             let answer = parts[1];
@@ -1066,11 +1065,11 @@ async fn handle_all_commands(
                         let sess = Arc::make_mut(&mut entry);
                         sess.captcha_verified = true;
                     }
-                    send_hex_chat(client, "&a&lCAPTCHA &f» &fПройдено! Освобождение на 4 часа.").await.ok();
+                    send_hex_chat(client, &proxy.config.t("captcha_passed", &[])).await.ok();
                     info!(%username, "CAPTCHA passed");
                 }
                 Ok(false) => {
-                    send_hex_chat(client, "&cНеверный код капчи. Попробуйте ещё раз.").await.ok();
+                    send_hex_chat(client, &proxy.config.t("captcha_wrong", &[])).await.ok();
                 }
                 Err(e) => {
                     send_hex_chat(client, &format!("&c{}", e)).await.ok();
@@ -1080,11 +1079,11 @@ async fn handle_all_commands(
         // ═══ Auth команды (tiAuth / baronessauth стиль) ═══
         "/auth" => {
             if !proxy.permissions.has(username, Permission::CommandAdmin) {
-                send_hex_chat(client, "&cНет прав на команду /auth.").await.ok();
+                send_hex_chat(client, &proxy.config.t("no_permission", &[])).await.ok();
                 return Ok(());
             }
             if parts.len() < 2 {
-                send_hex_chat(client, "&7Использование: &f/auth player <ник> delete &7— удалить аккаунт\\n&7&f/auth player <ник> password <пароль> &7— сменить пароль").await.ok();
+                send_hex_chat(client, &proxy.config.t("auth_usage", &[])).await.ok();
                 return Ok(());
             }
             match parts[1] {
@@ -1098,7 +1097,7 @@ async fn handle_all_commands(
                         Some("delete") => {
                             match proxy.auth.reset_account(target) {
                                 Ok(()) => {
-                                    send_hex_chat(client, &format!("&aАккаунт &f{} &aудалён из базы аутентификации.", target)).await.ok();
+                                    send_hex_chat(client, &proxy.config.t("account_deleted", &[("target", target)])).await.ok();
                                     info!(%username, "deleted account {}", target);
                                 }
                                 Err(e) => {
@@ -1114,7 +1113,7 @@ async fn handle_all_commands(
                             let new_password = parts[4];
                             match proxy.auth.set_password(target, new_password) {
                                 Ok(()) => {
-                                    send_hex_chat(client, &format!("&aПароль для &f{} &aизменён.", target)).await.ok();
+                                    send_hex_chat(client, &proxy.config.t("password_changed", &[("target", target)])).await.ok();
                                     info!(%username, "set password for {}", target);
                                 }
                                 Err(e) => {
@@ -1135,7 +1134,7 @@ async fn handle_all_commands(
         // ═══ BungeeCord команды ═══
         "/server" => {
             if !proxy.permissions.has(username, Permission::CommandServer) {
-                send_hex_chat(client, "&cНет прав на команду /server.").await.ok();
+                send_hex_chat(client, &proxy.config.t("no_permission", &[])).await.ok();
                 return Ok(());
             }
             if parts.len() < 2 {
@@ -1149,7 +1148,7 @@ async fn handle_all_commands(
         }
         "/hub" | "/lobby" => {
             if !proxy.permissions.has(username, Permission::CommandHub) {
-                send_hex_chat(client, "&cНет прав на команду /hub.").await.ok();
+                send_hex_chat(client, &proxy.config.t("no_permission", &[])).await.ok();
                 return Ok(());
             }
             do_server_switch(
@@ -1159,11 +1158,11 @@ async fn handle_all_commands(
         }
         "/find" => {
             if !proxy.permissions.has(username, Permission::CommandFind) {
-                send_hex_chat(client, "&cНет прав на команду /find.").await.ok();
+                send_hex_chat(client, &proxy.config.t("no_permission", &[])).await.ok();
                 return Ok(());
             }
             if parts.len() < 2 {
-                send_hex_chat(client, "&cИспользование: &f/find <игрок>").await.ok();
+                send_hex_chat(client, &proxy.config.t("help_cmd_find", &[])).await.ok();
                 return Ok(());
             }
             let target = parts[1];
@@ -1181,14 +1180,14 @@ async fn handle_all_commands(
         }
         "/serverlist" => {
             if !proxy.permissions.has(username, Permission::CommandServerList) {
-                send_hex_chat(client, "&cНет прав на команду /serverlist.").await.ok();
+                send_hex_chat(client, &proxy.config.t("no_permission", &[])).await.ok();
                 return Ok(());
             }
             send_server_list_message(client, proxy);
         }
         "/ping" => {
             if !proxy.permissions.has(username, Permission::CommandPing) {
-                send_hex_chat(client, "&cНет прав на команду /ping.").await.ok();
+                send_hex_chat(client, &proxy.config.t("no_permission", &[])).await.ok();
                 return Ok(());
             }
             let count = proxy.players.len();
@@ -1203,19 +1202,36 @@ async fn handle_all_commands(
         }
         "/help" => {
             if !proxy.permissions.has(username, Permission::CommandHelp) {
-                send_hex_chat(client, "&cНет прав на команду /help.").await.ok();
+                send_hex_chat(client, &proxy.config.t("no_permission", &[])).await.ok();
                 return Ok(());
             }
-            send_hex_chat(client, "&7=== &bRustProxy &7Команды &7===\\n&f/l <пароль> &7— вход\\n&f/reg <пароль> &7— регистрация\\n&f/logout &7— выход из аккаунта\\n&f/link &7— привязать Telegram\\n&f/tfa <on|off|status> &7— 2FA\\n&f/captcha <код> &7— капча\\n&f/server <имя> &7— перейти на сервер\\n&f/hub &7— на лобби\\n&f/find <игрок> &7— найти игрока\\n&f/serverlist &7— список серверов\\n&f/ping &7— пинг прокси\\n&7--- Админ ---\\n&f/auth player <ник> delete &7— удалить аккаунт\\n&f/auth player <ник> password <пароль> &7— сменить пароль\\n&f/perm user <ник> <право> &7— выдать право\\n&f/perm user <ник> -<право> &7— забрать право").await.ok();
+            send_hex_chat(client, &proxy.config.t("help_header", &[])).await.ok();
+                send_hex_chat(client, &proxy.config.t("help_cmd_login", &[])).await.ok();
+                send_hex_chat(client, &proxy.config.t("help_cmd_register", &[])).await.ok();
+                send_hex_chat(client, &proxy.config.t("help_cmd_logout", &[])).await.ok();
+                send_hex_chat(client, &proxy.config.t("help_cmd_link", &[])).await.ok();
+                send_hex_chat(client, &proxy.config.t("help_cmd_tfa", &[])).await.ok();
+                send_hex_chat(client, &proxy.config.t("help_cmd_captcha", &[])).await.ok();
+                send_hex_chat(client, &proxy.config.t("help_cmd_server", &[])).await.ok();
+                send_hex_chat(client, &proxy.config.t("help_cmd_hub", &[])).await.ok();
+                send_hex_chat(client, &proxy.config.t("help_cmd_find", &[])).await.ok();
+                send_hex_chat(client, &proxy.config.t("help_cmd_serverlist", &[])).await.ok();
+                send_hex_chat(client, &proxy.config.t("help_cmd_ping", &[])).await.ok();
+                send_hex_chat(client, &proxy.config.t("help_cmd_help", &[])).await.ok();
+                send_hex_chat(client, &proxy.config.t("help_admin_header", &[])).await.ok();
+                send_hex_chat(client, &proxy.config.t("help_auth_delete", &[])).await.ok();
+                send_hex_chat(client, &proxy.config.t("help_auth_password", &[])).await.ok();
+                send_hex_chat(client, &proxy.config.t("help_perm_grant", &[])).await.ok();
+                send_hex_chat(client, &proxy.config.t("help_perm_revoke", &[])).await.ok();
         }
         // ═══ Админ-команды (права доступа) ═══
         "/perm" => {
             if !proxy.permissions.has(username, Permission::CommandPerm) {
-                send_hex_chat(client, "&cНет прав на команду /perm.").await.ok();
+                send_hex_chat(client, &proxy.config.t("no_permission", &[])).await.ok();
                 return Ok(());
             }
             if parts.len() < 4 {
-                send_hex_chat(client, "&7Использование: &f/perm user <ник> <право> &7| &f/perm user <ник> -<право>").await.ok();
+                send_hex_chat(client, &proxy.config.t("perm_usage", &[])).await.ok();
                 send_hex_chat(client, "&7Права: &fcommand.server command.hub command.login command.register command.link command.tfa command.captcha command.ping command.help command.find command.serverlist command.proxy command.alert command.admin command.perm").await.ok();
                 return Ok(());
             }
@@ -1235,24 +1251,24 @@ async fn handle_all_commands(
                 Some(perm) => {
                     if grant {
                         proxy.permissions.grant(nick, perm);
-                        send_hex_chat(client, &format!("&aПраво &f{} &aвыдано &f{}&a.", perm.as_str(), nick)).await.ok();
+                        send_hex_chat(client, &proxy.config.t("perm_granted", &[("perm", perm.as_str()), ("nick", nick)])).await.ok();
                     } else {
                         proxy.permissions.revoke(nick, perm);
-                        send_hex_chat(client, &format!("&cПраво &f{} &cзабрано у &f{}&c.", perm.as_str(), nick)).await.ok();
+                        send_hex_chat(client, &proxy.config.t("perm_revoked", &[("perm", perm.as_str()), ("nick", nick)])).await.ok();
                     }
                 }
                 None => {
-                    send_hex_chat(client, "&cНеизвестное право. &f/help").await.ok();
+                    send_hex_chat(client, &proxy.config.t("perm_unknown", &[])).await.ok();
                 }
             }
         }
         "/alert" => {
             if !proxy.permissions.has(username, Permission::CommandAlert) {
-                send_hex_chat(client, "&cНет прав на команду /alert.").await.ok();
+                send_hex_chat(client, &proxy.config.t("no_permission", &[])).await.ok();
                 return Ok(());
             }
             if parts.len() < 2 {
-                send_hex_chat(client, "&cИспользование: &f/alert <сообщение>").await.ok();
+                send_hex_chat(client, &proxy.config.t("alert_usage", &[])).await.ok();
                 return Ok(());
             }
             let message = parts[1..].join(" ");
@@ -1264,11 +1280,11 @@ async fn handle_all_commands(
             for entry in proxy.players.iter() {
                 let _ = entry.value().client.lock().await.send(pkt.clone()).await;
             }
-            send_hex_chat(client, "&aАлерт отправлен всем игрокам.").await.ok();
+            send_hex_chat(client, &proxy.config.t("alert_sent", &[])).await.ok();
         }
         // Исключены пользователем: /reply /vanish /message /spy
         _ => {
-            send_hex_chat(client, "&cНеизвестная команда. &f/help").await.ok();
+            send_hex_chat(client, &proxy.config.t("unknown_command", &[])).await.ok();
         }
     }
     Ok(())
@@ -1328,7 +1344,7 @@ async fn do_server_switch(
         ).await;
     });
 
-    send_hex_chat(client, &format!("&aПереключился на сервер &f{}", name)).await.ok();
+    send_hex_chat(client, &proxy.config.t("server_switch", &[("server", name)])).await.ok();
     Ok(())
 }
 
@@ -1336,16 +1352,20 @@ async fn do_server_switch(
 fn send_server_list_message(client: &ClientLink, proxy: &Arc<Proxy>) {
     let proxy_arc = Arc::clone(proxy);
     let client_arc = client.clone();
+    let header = proxy.config.t("server_list_header", &[]);
+    let footer = proxy.config.t("server_list_footer", &[]);
+    let online_str = proxy.config.t("server_online", &[]);
+    let offline_str = proxy.config.t("server_offline", &[]);
     tokio::spawn(async move {
         let mut extra: Vec<serde_json::Value> = Vec::new();
-        extra.push(serde_json::json!({"text": "&7=== &bСерверы &7===\\n", "color": "reset"}));
+        extra.push(serde_json::json!({"text": header, "color": "reset"}));
 
         for entry in proxy_arc.servers.iter() {
             let s = entry.value();
             let online = s.online.load(std::sync::atomic::Ordering::Relaxed);
             let players = s.players.load(std::sync::atomic::Ordering::Relaxed);
             let max = s.max;
-            let status = if online { "&a●" } else { "&c●" };
+            let status = if online { online_str.as_str() } else { offline_str.as_str() };
             let motd = s.motd.read().await.clone();
             let line = format!(
                 "{} {} &f{}/{} &7{}",
@@ -1363,7 +1383,7 @@ fn send_server_list_message(client: &ClientLink, proxy: &Arc<Proxy>) {
             extra.push(serde_json::json!({"text": "\\n", "color": "reset"}));
         }
 
-        extra.push(serde_json::json!({"text": "\\n&fНажмите &a[connect] &fчтобы подключиться.", "color": "reset"}));
+        extra.push(serde_json::json!({"text": footer, "color": "reset"}));
 
         let payload = serde_json::json!({"text": "", "extra": extra}).to_string();
         let _ = client_arc.lock().await.send(packet_bytes(
@@ -1373,24 +1393,14 @@ fn send_server_list_message(client: &ClientLink, proxy: &Arc<Proxy>) {
     });
 }
 
-/// Сообщение: требуется авторизация.
-fn build_auth_required_message(username: &str) -> String {
-    format_message(&format!(
-        "&c&lТребуется авторизация &f» &fВведите &a/l <пароль> &fили &a/reg <пароль>\n\
-         &7Добро пожаловать, &e{}\n\
-         &7После авторизации используйте &a/hub &fдля перехода на лобби.",
-        username
-    ))
+/// Сообщение: требуется авторизация (перевод из конфига).
+fn build_auth_required_message(config: &crate::config::ProxyConfig, username: &str) -> String {
+    config.t("auth_required", &[("player", username)])
 }
 
-/// Приветственное сообщение (после авторизации).
-fn build_welcome_message(username: &str) -> String {
-    format_message(&format!(
-        "&a&lАвторизация &f» &fДобро пожаловать, &e{}\n\
-         &7Используйте &a/server <имя> &fили &a/hub &fдля перехода на сервер.\n\
-         &fСписок серверов: &a/serverlist",
-        username
-    ))
+/// Приветственное сообщение (после авторизации, перевод из конфига).
+fn build_welcome_message(config: &crate::config::ProxyConfig, username: &str) -> String {
+    config.t("welcome", &[("player", username)])
 }
 
 // ========================================================================

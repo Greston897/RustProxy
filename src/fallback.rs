@@ -129,13 +129,7 @@ pub async fn do_fallback_switch(
 /// Сформировать сообщение с HEX цветами.
 /// Поддерживает &b, &f, &e, &6 и & #RRGGBB (упрощённый парсер).
 pub fn fallback_message(config: &ProxyConfig, old_server: &str, fallback: &str) -> String {
-    // Базовый шаблон с HEX
-    let raw = &config.proxy.motd; // можно вынести отдельный конфиг
-    let _ = raw;
-    format!(
-        "&b&lRustProxy &f» &eСервер &c{} &eушёл оффлайн. &fПерекидываем на &a{} &bбез дисконнекта.",
-        old_server, fallback
-    )
+    config.t("fallback_kick", &[("server", old_server), ("fallback", fallback)])
 }
 
 /// Отправить чат-сообщение с HEX-поддержкой клиенту.

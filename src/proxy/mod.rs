@@ -248,12 +248,13 @@ impl Proxy {
         let player_uuids: Vec<Uuid> = self.players.iter().map(|e| *e.key()).collect();
         for uuid in player_uuids {
             if let Some(entry) = self.players.get(&uuid) {
-                let _ = entry.client.lock().await.send(
-                    crate::protocol::packets::packet_bytes(
-                        crate::protocol::packets::ids::PLAY_CHAT_MESSAGE_CLIENTBOUND,
-                        r#"{"text":"&c&lРЕБУТ СЕРВЕРА &f» &fПрокси перезагружается. Переподключитесь через несколько секунд.","color":"red"}"#.as_bytes(),
-                    ),
-                ).await;
+                    let shutdown_msg = self.config.t("shutdown_message", &[]);
+                    let _ = entry.client.lock().await.send(
+                        crate::protocol::packets::packet_bytes(
+                            crate::protocol::packets::ids::PLAY_CHAT_MESSAGE_CLIENTBOUND,
+                            shutdown_msg.as_bytes(),
+                        ),
+                    ).await;
             }
         }
 

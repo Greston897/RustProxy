@@ -404,6 +404,93 @@ impl Default for TranslationsSection {
     }
 }
 
+/// Подставить значения в шаблон перевода ({player}, {target} и т.д.)
+/// и применить HEX/&цвета + multiline (\n) форматирование.
+pub fn t(&self, key: &str, replacements: &[(&str, &str)]) -> String {
+    let template = match key {
+        "auth_required" => &self.translations.auth_required,
+        "welcome" => &self.translations.welcome,
+        "registered" => &self.translations.registered,
+        "login_success" => &self.translations.login_success,
+        "logged_out" => &self.translations.logged_out,
+        "account_not_found" => &self.translations.account_not_found,
+        "wrong_password" => &self.translations.wrong_password,
+        "account_deleted" => &self.translations.account_deleted,
+        "password_changed" => &self.translations.password_changed,
+        "password_too_short" => &self.translations.password_too_short,
+        "username_invalid" => &self.translations.username_invalid,
+        "tfa_on" => &self.translations.tfa_on,
+        "tfa_off" => &self.translations.tfa_off,
+        "tfa_link_first" => &self.translations.tfa_link_first,
+        "tfa_status" => &self.translations.tfa_status,
+        "tfa_help" => &self.translations.tfa_help,
+        "tfa_2fa_required" => &self.translations.tfa_2fa_required,
+        "tfa_confirm_sent" => &self.translations.tfa_confirm_sent,
+        "tfa_confirmed" => &self.translations.tfa_confirmed,
+        "tfa_denied" => &self.translations.tfa_denied,
+        "tfa_not_linked" => &self.translations.tfa_not_linked,
+        "link_code_sent" => &self.translations.link_code_sent,
+        "link_success" => &self.translations.link_success,
+        "link_not_linked" => &self.translations.link_not_linked,
+        "link_invalid_code" => &self.translations.link_invalid_code,
+        "link_expired" => &self.translations.link_expired,
+        "link_wrong_account" => &self.translations.link_wrong_account,
+        "link_tg_already_used" => &self.translations.link_tg_already_used,
+        "captcha_passed" => &self.translations.captcha_passed,
+        "captcha_wrong" => &self.translations.captcha_wrong,
+        "captcha_usage" => &self.translations.captcha_usage,
+        "captcha_too_many" => &self.translations.captcha_too_many,
+        "captcha_expired" => &self.translations.captcha_expired,
+        "captcha_no_session" => &self.translations.captcha_no_session,
+        "captcha_ip_banned" => &self.translations.captcha_ip_banned,
+        "server_switch" => &self.translations.server_switch,
+        "server_list_header" => &self.translations.server_list_header,
+        "server_list_footer" => &self.translations.server_list_footer,
+        "server_list_line" => &self.translations.server_list_line,
+        "server_online" => &self.translations.server_online,
+        "server_offline" => &self.translations.server_offline,
+        "player_not_found" => &self.translations.player_not_found,
+        "player_found" => &self.translations.player_found,
+        "proxy_stats" => &self.translations.proxy_stats,
+        "unknown_command" => &self.translations.unknown_command,
+        "no_permission" => &self.translations.no_permission,
+        "alert_sent" => &self.translations.alert_sent,
+        "alert_usage" => &self.translations.alert_usage,
+        "perm_usage" => &self.translations.perm_usage,
+        "perm_granted" => &self.translations.perm_granted,
+        "perm_revoked" => &self.translations.perm_revoked,
+        "perm_unknown" => &self.translations.perm_unknown,
+        "auth_usage" => &self.translations.auth_usage,
+        "help_header" => &self.translations.help_header,
+        "help_cmd_login" => &self.translations.help_cmd_login,
+        "help_cmd_register" => &self.translations.help_cmd_register,
+        "help_cmd_logout" => &self.translations.help_cmd_logout,
+        "help_cmd_link" => &self.translations.help_cmd_link,
+        "help_cmd_tfa" => &self.translations.help_cmd_tfa,
+        "help_cmd_captcha" => &self.translations.help_cmd_captcha,
+        "help_cmd_server" => &self.translations.help_cmd_server,
+        "help_cmd_hub" => &self.translations.help_cmd_hub,
+        "help_cmd_find" => &self.translations.help_cmd_find,
+        "help_cmd_serverlist" => &self.translations.help_cmd_serverlist,
+        "help_cmd_ping" => &self.translations.help_cmd_ping,
+        "help_cmd_help" => &self.translations.help_cmd_help,
+        "help_admin_header" => &self.translations.help_admin_header,
+        "help_auth_delete" => &self.translations.help_auth_delete,
+        "help_auth_password" => &self.translations.help_auth_password,
+        "help_perm_grant" => &self.translations.help_perm_grant,
+        "help_perm_revoke" => &self.translations.help_perm_revoke,
+        "shutdown_message" => &self.translations.shutdown_message,
+        "fallback_kick" => &self.translations.fallback_kick,
+        _ => key, // неизвестный ключ — возвращаем как есть
+    };
+
+    let mut result = template.to_string();
+    for (placeholder, value) in replacements {
+        result = result.replace(&format!("{{{}}}", placeholder), value);
+    }
+    crate::messages::format_message(&result)
+}
+
 impl ProxyConfig {
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
         let text = std::fs::read_to_string(path)
