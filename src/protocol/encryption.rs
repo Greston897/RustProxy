@@ -137,7 +137,7 @@ impl AesCfb8 {
     /// Обрабатывает `input` (шифрует или дешифрует — результат одинаковый), обновляя IV.
     pub fn update(&mut self, input: &[u8]) -> Vec<u8> {
         let mut output = Vec::with_capacity(input.len());
-        let block_size = <Aes128 as BlockSizeUser>::block_size();
+        let block_size = 16usize; // AES-128 block size
         for &byte in input {
             let mut block: GenericArray<u8, _> = self.iv.into();
             // Заглушка AES (в реальном режиме здесь BlockEncryptor::encrypt_block)
