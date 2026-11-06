@@ -346,7 +346,7 @@ async fn handle_play_full(
     );
 
     // Сообщение: нужна авторизация
-    let auth_msg = build_auth_required_message(&config, &username);
+    let auth_msg = build_auth_required_message(&*config, &username);
     {
         let mut c = client.lock().await;
         c.send(packet_bytes(
@@ -424,7 +424,7 @@ async fn handle_play_cached(
     proxy.players.insert(uuid, Arc::new(ps));
 
     // Приветствие
-    let welcome = build_welcome_message(&config, &username);
+    let welcome = build_welcome_message(&*config, &username);
     {
         let mut c = client.lock().await;
         c.send(packet_bytes(

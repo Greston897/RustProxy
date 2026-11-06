@@ -405,7 +405,9 @@ impl Default for TranslationsSection {
 }
 
 /// Подставить значения в шаблон перевода ({player}, {target} и т.д.)
-/// и применить HEX/&цвета + multiline (\n) форматирование.
+
+
+impl ProxyConfig {
 pub fn t(&self, key: &str, replacements: &[(&str, &str)]) -> String {
     let template = match key {
         "auth_required" => &self.translations.auth_required,
@@ -491,7 +493,6 @@ pub fn t(&self, key: &str, replacements: &[(&str, &str)]) -> String {
     crate::messages::format_message(&result)
 }
 
-impl ProxyConfig {
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("failed to read config {:?}", path.as_ref().display()))?;
