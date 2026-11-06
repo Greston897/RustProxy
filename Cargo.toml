@@ -31,7 +31,7 @@ thiserror = "1"
 futures-util = "0.3"
 
 # Шифрование логина (AES/CFB8 + RSA PKCS#1 v1.5, как в Minecraft)
-aes = "0.10"
+aes = "0.9"
 cipher = "0.4"
 rsa = { version = "0.9", features = ["pkcs1v15", "spki"] }
 rand = "0.8"
