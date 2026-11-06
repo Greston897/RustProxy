@@ -29,7 +29,6 @@ use crate::protocol::encryption::ServerKeyPair;
 use crate::protocol::packets::{
     handshake_bytes, login_start_bytes, packet_bytes, Handshake, LoginStart, ids, LOGIN_START,
 };
-use crate::protocol::varint::{read_varint, read_string};
 use crate::protocol::versions;
 use crate::tfa::TfaManager;
 
@@ -38,6 +37,7 @@ pub struct Proxy {
     pub auth: AuthManager,
     pub tfa: Arc<Mutex<TfaManager>>,
     pub captcha: Arc<Mutex<CaptchaManager>>,
+    pub ban: Arc<BanManager>,
     pub key_pair: ServerKeyPair,
     pub metrics: Arc<Metrics>,
     pub ddos: Arc<DDoSManager>,
@@ -78,6 +78,8 @@ pub struct PlayerSession {
     pub tfa_verified: bool,
     pub captcha_verified: bool,
     pub login_ip: Option<std::net::IpAddr>,
+    /// Клиентский бренд (из minecraft:brand), часть отпечатка.\n    pub client_brand: Option<String>,
+    /// Отпечаток клиента для поиска твинов (не только IP).\n    pub fingerprint: Option<String>,
 }
 
 pub struct BackendLink {
@@ -100,6 +102,8 @@ impl PlayerSession {
             tfa_verified: false,
             captcha_verified: false,
             login_ip: None,
+            client_brand: None,
+            fingerprint: None,
         }
     }
 }
@@ -109,6 +113,7 @@ impl Proxy {
         let auth = AuthManager::new();
         let tfa = Arc::new(Mutex::new(TfaManager::new(config.tfa.bot_token.clone())?));
         let captcha = Arc::new(Mutex::new(CaptchaManager::new()?));
+        let ban = Arc::new(BanManager::new());
         let key_pair = ServerKeyPair::generate()?;
         info!("RSA ключевая пара сгенерирована (1024 бит)");
         let metrics = Arc::new(Metrics::new());
@@ -140,6 +145,7 @@ impl Proxy {
             auth,
             tfa,
             captcha,
+            ban,
             key_pair,
             metrics,
             ddos,
@@ -177,19 +183,30 @@ impl Proxy {
                         }
                     };
                     for upd in updates {
-                        match p.tfa.lock().await.handle_bot_response(upd.chat_id, &upd.text) {
+                        let cb = upd.callback_query.as_deref();
+                        match p.tfa.lock().await.handle_bot_response(upd.chat_id, &upd.text, cb) {
                             Ok(Some(uuid)) => {
-                                info!(%uuid, "TFA login confirmed via Telegram (/da)");
+                                info!(%uuid, "TFA login confirmed via Telegram (кнопка /da)");
                                 if let Some(ps) = p.players.get(&uuid) {
                                     let mut new_ps = (*ps).clone();
                                     new_ps.tfa_verified = true;
                                     new_ps.authenticated = true;
                                     p.players.insert(uuid, Arc::new(new_ps));
+                                    let client_link = ps.client.clone();
+                                    let username = new_ps.username.clone();
+                                    let _ = crate::network::connection::send_hex_chat_to_link(
+                                        &client_link,
+                                        &format!("&a&lВход подтверждён &f» &fДобро пожаловать, &e{}", username),
+                                    );
+                                    let _ = p.tfa.lock().await.send_login_result(upd.chat_id, &username, true).await;
                                 }
                             }
                             Ok(None) => {}
                             Err(e) => {
                                 warn!("tfa bot response: {e}");
+                                if let Some(text) = &upd.text {
+                                    let _ = p.tfa.lock().await.send_login_result(upd.chat_id, "игрока", false).await;
+                                }
                             }
                         }
                     }

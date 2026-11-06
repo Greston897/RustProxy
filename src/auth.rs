@@ -32,6 +32,8 @@ pub struct Account {
     pub tg_chat_id: Option<i64>,
     /// 2FA включён?
     pub tfa_enabled: bool,
+    /// Админ-права (выдаются навсегда командой /admin)
+    pub is_admin: bool,
 }
 
 impl Account {
@@ -49,6 +51,7 @@ impl Account {
             total_logins: 0,
             tg_chat_id: None,
             tfa_enabled: false,
+            is_admin: false,
         }
     }
 
@@ -190,6 +193,13 @@ impl AuthManager {
     /// Получить аккаунт по нику.
     pub fn get_account(&self, username: &str) -> Option<Account> {
         self.accounts.get(username).map(|e| e.clone())
+    }
+
+    /// Выдать/забрать админ-права (навсегда).
+    pub fn set_admin(&self, username: &str, admin: bool) {
+        if let Some(mut acc) = self.accounts.get_mut(username) {
+            acc.is_admin = admin;
+        }
     }
 
     /// Проверка существования аккаунта.

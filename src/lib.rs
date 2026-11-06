@@ -16,6 +16,7 @@
 //!             + система соединений [connect]/[server] в лобби (Velocity/NullCord стиль)
 
 pub mod auth;
+pub mod ban;
 pub mod backend_monitor;
 pub mod captcha;
 pub mod config;

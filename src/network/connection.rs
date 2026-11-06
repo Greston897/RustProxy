@@ -17,6 +17,7 @@ use futures_util::sink::SinkExt;
 use tracing::{debug, error, info, warn};
 
 use crate::auth::{offline_uuid, AuthManager, AuthMode, PlayerProfile, Session};
+use crate::ban::BanManager;
 use crate::backend_monitor::BackendMonitor;
 use crate::captcha::CaptchaManager;
 use crate::config::ProxyConfig;
@@ -24,6 +25,7 @@ use crate::ddos_protection::DDoSManager;
 use crate::fallback;
 use crate::messages::{self, format_message, convert_to_minecraft};
 use crate::metrics::Metrics;
+use serde_json::json;
 use crate::protocol::codec::MinecraftCodec;
 use crate::protocol::encryption::{self, generate_shared_secret};
 use crate::protocol::packets::{
@@ -167,6 +169,17 @@ async fn handle_login(
             &convert_to_minecraft("&cАккаунт не найден. Зарегистрируйтесь: &f/reg <пароль>"),
         )
         .await?;
+        return Ok(());
+    }
+
+    // 4. Проверка бан ника (перед сессией)
+    if proxy.ban.is_nick_banned(&start.username) {
+        if let Some(info) = proxy.ban.nick_ban(&start.username) {
+            let reason = format!("&c&lЗАБАНЕН &f» &c{}\n&7Забанил: &f{}\n&7Причина: &f{}", info.reason, info.banned_by, info.reason);
+            send_login_disconnect(client, &reason).await?;
+        } else {
+            send_login_disconnect(client, "&c&lЗАБАНЕН &f» &fВы забанены.").await?;
+        }
         return Ok(());
     }
 
@@ -719,6 +732,26 @@ async fn client_to_backend_loop_auth(
             }
         };
 
+        // Отпечаток клиента: сбор бренда из minecraft:brand / MC|Brand (твины, не только IP)
+        if id == 0x09 {
+            if let Some(brand) = extract_client_brand(&body) {
+                if let Some(mut entry) = proxy_arc.players.get_mut(&session.profile.uuid) {
+                    entry.client_brand = Some(brand.clone());
+                    let fp = format!("{}:{}", brand, server_protocol);
+                    entry.fingerprint = Some(fp.clone());
+                    proxy_arc.ban.register_fingerprint(session.profile.uuid, username.clone(), &fp);
+                    if proxy_arc.ban.is_fingerprint_banned(&fp) {
+                        let _ = send_hex_chat(
+                            client,
+                            "&c&lЗАБАНЕН &f» &fВаш отпечаток клиента забанен (твин забаненного аккаунта).",
+                        )
+                        .await;
+                        return Ok(());
+                    }
+                }
+            }
+        }
+
         if is_nbt_packet(id) {
             if !proxy_arc.ddos.check_nbt_packet(peer_ip) {
                 warn!(%username, "DDoS: NBT out rate limit");
@@ -817,6 +850,26 @@ async fn client_to_backend_loop_cached(
             }
         };
 
+        // Отпечаток клиента: сбор бренда из minecraft:brand / MC|Brand (твины, не только IP)
+        if id == 0x09 {
+            if let Some(brand) = extract_client_brand(&body) {
+                if let Some(mut entry) = proxy_arc.players.get_mut(&uuid) {
+                    entry.client_brand = Some(brand.clone());
+                    let fp = format!("{}:{}", brand, server_protocol);
+                    entry.fingerprint = Some(fp.clone());
+                    proxy_arc.ban.register_fingerprint(uuid, username.clone(), &fp);
+                    if proxy_arc.ban.is_fingerprint_banned(&fp) {
+                        let _ = send_hex_chat(
+                            client,
+                            "&c&lЗАБАНЕН &f» &fВаш отпечаток клиента забанен (твин забаненного аккаунта).",
+                        )
+                        .await;
+                        return Ok(());
+                    }
+                }
+            }
+        }
+
         if is_nbt_packet(id) {
             if !proxy_arc.ddos.check_nbt_packet(peer_ip) {
                 warn!(%username, "DDoS: NBT out rate limit");
@@ -893,7 +946,15 @@ async fn handle_all_commands(
             let password = parts[1];
             match proxy.auth.register(username, password) {
                 Ok(_) => {
-                    send_hex_chat(client, "&a&lРегистрация &f» &fАккаунт создан. Теперь &a/login <пароль>").await.ok();
+                    // Первый зарегистрированный аккаунт становится админом (bootstrap)
+                    if proxy.auth.account_count() == 1 {
+                        proxy.auth.set_admin(username, true);
+                        proxy.tfa.lock().await.set_admin(username, true);
+                        send_hex_chat(client, "&a&lРегистрация &f» &fАккаунт создан. Вы &cпервый админ &fсервера.").await.ok();
+                        info!(%username, "registered as first admin");
+                    } else {
+                        send_hex_chat(client, "&a&lРегистрация &f» &fАккаунт создан. Теперь &a/login <пароль>").await.ok();
+                    }
                     info!(%username, "registered new account");
                 }
                 Err(e) => {
@@ -1119,7 +1180,149 @@ async fn handle_all_commands(
             )).await.ok();
         }
         "/help" => {
-            send_hex_chat(client, "&7=== &bRustProxy &7Команды &7===\n&f/l <пароль> &7— вход\n&f/reg <пароль> &7— регистрация\n&f/link &7— привязать Telegram\n&f/tfa <on|off|status> &7— 2FA\n&f/captcha <код> &7— капча\n&f/server <имя> &7— перейти на сервер\n&f/hub &7— на лобби\n&f/find <игрок> &7— найти игрока\n&f/serverlist &7— список серверов\n&f/ping &7— пинг прокси").await.ok();
+            send_hex_chat(client, "&7=== &bRustProxy &7Команды &7===\n&f/l <пароль> &7— вход\n&f/reg <пароль> &7— регистрация\n&f/link &7— привязать Telegram\n&f/tfa <on|off|status> &7— 2FA\n&f/captcha <код> &7— капча\n&f/server <имя> &7— перейти на сервер\n&f/hub &7— на лобби\n&f/find <игрок> &7— найти игрока\n&f/serverlist &7— список серверов\n&f/ping &7— пинг прокси\\n&7--- Админ ---\\n&f/admin <ник>|all &7— админ-права\\n&f/ban <ник> [причина] &7— бан + твины\\n&f/unban <ник> &7— разбан\\n&f/banlist &7— список банов\\n&f/twins <ник> &7— твины по отпечатку\\n&f/fingerprint &7— отпечаток клиента").await.ok();
+        }
+        // ═══ Админ-команды (только для админов) ═══
+        "/admin" => {
+            let is_admin = proxy.auth.get_account(username)
+                .map(|a| a.is_admin).unwrap_or(false);
+            if !is_admin {
+                send_hex_chat(client, "&cНедостаточно прав: команда только для админов.").await.ok();
+                 return Ok(());
+            }
+            match parts.get(1) {
+                Some("all") => {
+                    let mut count = 0u32;
+                    for entry in proxy.auth.accounts.iter() {
+                        let acc = entry.value();
+                        if !acc.is_admin {
+                            count += 1;
+                        }
+                        proxy.auth.set_admin(&acc.username, true);
+                        proxy.tfa.lock().await.set_admin(&acc.username, true);
+                    }
+                    send_hex_chat(client, &format!("&aАдмин-права выданы &c{} &fаккаунтам (все).", count)).await.ok();
+                    info!(%username, "admin all: {}", count);
+                }
+                Some(nick) => {
+                    let exists = proxy.auth.account_exists(nick);
+                    proxy.auth.set_admin(nick, true);
+                    proxy.tfa.lock().await.set_admin(nick, true);
+                    if exists {
+                        send_hex_chat(client, &format!("&aАдмин-права выданы &f{}&a (навсегда).", nick)).await.ok();
+                    } else {
+                        send_hex_chat(client, &format!("&f{} &aустановлен админом (права применятся при первом входе).", nick)).await.ok();
+                    }
+                    info!(%username, "admin set: {}", nick);
+                }
+                None => {
+                    send_hex_chat(client, "&7Использование: &f/admin <ник> &7или &f/admin all").await.ok();
+                }
+            }
+        }
+        "/ban" => {
+            let is_admin = proxy.auth.get_account(username)
+                .map(|a| a.is_admin).unwrap_or(false);
+            if !is_admin {
+                send_hex_chat(client, "&cНедостаточно прав: команда только для админов.").await.ok();
+                 return Ok(());
+            }
+            if parts.len() < 2 {
+                send_hex_chat(client, "&cИспользование: &f/ban <ник> [причина]").await.ok();
+                 return Ok(());
+            }
+            let nick = parts[1];
+            let reason = if parts.len() > 2 { parts[2..].join(" ") } else { "Нарушение правил".to_string() };
+            proxy.ban.ban_nick(nick, reason.clone(), username.to_string()).ok();
+
+            // Бан по отпечатку, если игрок онлайн — ловим твинов сразу
+            if let Some(entry) = proxy.players.iter().find(|e| e.value().username == nick) {
+                if let Some(fp) = entry.value().fingerprint.as_deref() {
+                    let _ = proxy.ban.ban_fingerprint(fp, format!("твин забаненного аккаунта {}", nick), username.to_string());
+                }
+                // Отправляем бан-сообщение и разрываем игровой цикл клиента
+                let client_link = entry.value().client.clone();
+                let reason_msg = format!("&c&lЗАБАНЕН &f» &c{}\n&7Забанил: &f{}", reason, username);
+                let _ = send_hex_chat_to_link(&client_link, &reason_msg).await;
+                // клиент сам отключится при следующей отправке/чтении
+            }
+
+            send_hex_chat(client, &format!("&aИгрок &f{} &aзабанен. Причина: &f{}", nick, reason)).await.ok();
+            info!(%username, "banned {}: {}", nick, reason);
+        }
+        "/unban" => {
+            let is_admin = proxy.auth.get_account(username)
+                .map(|a| a.is_admin).unwrap_or(false);
+            if !is_admin {
+                send_hex_chat(client, "&cНедостаточно прав: команда только для админов.").await.ok();
+                 return Ok(());
+            }
+            if parts.len() < 2 {
+                send_hex_chat(client, "&cИспользование: &f/unban <ник>").await.ok();
+                 return Ok(());
+            }
+            let nick = parts[1];
+            let ok = proxy.ban.unban_nick(nick);
+            send_hex_chat(client, if ok { &format!("&aИгрок &f{} &aразбанен.", nick) } else { &format!("&cИгрок &f{} &cне был забанен.", nick) }).await.ok();
+        }
+        "/banlist" => {
+            let is_admin = proxy.auth.get_account(username)
+                .map(|a| a.is_admin).unwrap_or(false);
+            if !is_admin {
+                send_hex_chat(client, "&cНедостаточно прав: команда только для админов.").await.ok();
+                 return Ok(());
+            }
+            let bans = proxy.ban.ban_list();
+            let mut lines: Vec<String> = Vec::new();
+            lines.push("&7=== &bБаны &7===".to_string());
+            for b in bans {
+                lines.push(format!("&7{} &f({}) &7— &f{}", b.target, b.reason, b.banned_by));
+            }
+            if bans.is_empty() {
+                lines.push("&7Нет активных банов.".to_string());
+            }
+            send_hex_chat(client, &lines.join("\n")).await.ok();
+        }
+        "/twins" | "/alts" => {
+            if parts.len() < 2 {
+                send_hex_chat(client, "&cИспользование: &f/twins <ник>").await.ok();
+                 return Ok(());
+            }
+            let nick = parts[1];
+            let mut target_uuid = None;
+            let mut target_fp = None;
+            for entry in proxy.players.iter() {
+                if entry.value().username == nick {
+                    target_uuid = Some(*entry.key());
+                    target_fp = entry.value().fingerprint.clone();
+                    break;
+                }
+            }
+            let fp = match target_fp {
+                Some(f) => f,
+                None => {
+                    send_hex_chat(client, &format!("&cИгрок &f{} &cне найден онлайн или у него нет отпечатка.", nick)).await.ok();
+                    return Ok(());
+                }
+            };
+            let twins = proxy.ban.twins_for(&target_uuid.unwrap(), &fp);
+            if twins.is_empty() {
+                send_hex_chat(client, &format!("&7Твины для &f{} &7не найдены (уникальный отпечаток).", nick)).await.ok();
+            } else {
+                send_hex_chat(client, &format!("&7Твины &f{} &7(один отпечаток): &f{}", nick, twins.join(", "))).await.ok();
+            }
+        }
+        "/fingerprint" => {
+            let fp = proxy.players.get(uuid)
+                .and_then(|e| e.fingerprint.clone())
+                .unwrap_or_else(|| "ещё не собран".to_string());
+            let brand = proxy.players.get(uuid)
+                .and_then(|e| e.client_brand.clone())
+                .unwrap_or_else(|| "неизвестно".to_string());
+            send_hex_chat(client, &format!(
+                "&7Ваш отпечаток: &f{}\n&7Клиент: &f{}",
+                fp, brand
+            )).await.ok();
         }
         // Исключены пользователем: /reply /vanish /message /spy
         _ => {
@@ -1127,6 +1330,28 @@ async fn handle_all_commands(
         }
     }
     Ok(())
+}
+
+/// Отправить чат-сообщение по готовой ClientLink (для бан-рассылки онлайн-игроку).
+pub async fn send_hex_chat_to_link(link: &ClientLink, text: &str) -> Result<()> {
+    let formatted = format_message(text);
+    let mut c = link.lock().await;
+    c.send(packet_bytes(PLAY_CHAT_MESSAGE_CLIENTBOUND, formatted.as_bytes())).await
+}
+
+/// Извлечь бренд клиента из плагин-сообщения minecraft:brand / MC|Brand.
+fn extract_client_brand(body: &[u8]) -> Option<String> {
+    use crate::protocol::varint::read_string;
+    let (chan_n, channel) = read_string(body)?;
+    let rest = &body[chan_n..];
+    if channel == "minecraft:brand" || channel == "MC|Brand" {
+        if let Some((_, brand)) = read_string(rest) {
+            if !brand.is_empty() {
+                return Some(brand);
+            }
+        }
+    }
+    None
 }
 
 /// Переключение сервера (/server, /hub, /lobby).
