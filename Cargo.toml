@@ -65,6 +65,10 @@ rand_chacha = "0.3"
 image = { version = "0.25", features = ["png"] }
 qrencode = "0.14"
 
+# HEX цветовые коды и regex для parse сообщений
+regex = "1"
+once_cell = "1"
+
 # Telegram Bot API
 teloxide = "0.17"
 
