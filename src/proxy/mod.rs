@@ -261,7 +261,7 @@ impl Proxy {
     }
 
     async fn start_pinger(self: Arc<Self>) {
-        let interval_secs = self.config.ping_interval_secs();
+        let interval_secs = self.config.status.ping_interval_secs;
         let mut interval = time::interval(Duration::from_secs(interval_secs));
         loop {
             interval.tick().await;
