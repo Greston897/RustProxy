@@ -52,17 +52,17 @@ jobs:
               echo '```'
             } >> "$GITHUB_STEP_SUMMARY"
             # Текст с первой строки `error` до конца; чанкуем на аннотации по ~5500 символов
-            python3 << 'EOF'
-import re
-data = open('build.clean.log', errors='replace').read()
-m = re.search(r'(?m)^error', data)
-text = data[m.start():] if m else data
-text = text[-56000:]
-chunks = [text[i:i+5500] for i in range(0, len(text), 5500)][:12]
-for c in chunks:
-    c = c.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
-    print(f'::error::{c}')
-EOF
+          python3 << 'PYEOF'
+          import re
+          data = open('build.clean.log', errors='replace').read()
+          m = re.search(r'(?m)^error', data)
+          text = data[m.start():] if m else data
+          text = text[-56000:]
+          chunks = [text[i:i+5500] for i in range(0, len(text), 5500)][:12]
+          for c in chunks:
+              c = c.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
+              print(f'::error::{c}')
+          PYEOF
             # По одному annotations на каждую строку-локацию rustc (file:line)
             grep -E '^[[:space:]]+--> ' build.clean.log | head -8 | while IFS= read -r loc; do
               path=$(printf '%s' "$loc" | sed -E 's/.*-->[[:space:]]*([^:]+):.*/\1/' | tr -d ' ')
