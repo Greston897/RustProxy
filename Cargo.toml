@@ -69,12 +69,6 @@ qrencode = "0.7"
 # Telegram Bot API
 teloxide = "0.21"
 
-# HEX цвета и красивые сообщения
-ansi-parser = "0.1"
-
-# ДDoS защита и лимитирование
-tokio-tungstenite = "0.21"
-
 # metriки (развитие)
 prometheus = { version = "0.13", features = ["process"] }
 

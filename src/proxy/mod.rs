@@ -6,7 +6,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, Mutex};
 use tokio::time;
