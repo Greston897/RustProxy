@@ -208,6 +208,11 @@ impl AuthManager {
     }
 }
 
+/// Офлайн-UUID игрока (NAMESPACE_DNS от "OfflinePlayer:<ник>").
+pub fn offline_uuid(username: &str) -> Uuid {
+    Uuid::new_v5(&Uuid::NAMESPACE_DNS, format!("OfflinePlayer:{}", username).as_bytes())
+}
+
 /// Генерация случайной соли.
 fn generate_salt() -> String {
     use rand::RngCore;

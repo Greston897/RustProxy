@@ -1,42 +1,46 @@
 //! Обработка одного соединения игрока с полной интеграцией:
-//! Auth (/login /register /l /reg), TFA (Telegram 2FA), CAPTCHA, Skins, Fallback, DDoS NBT.
+//! Auth (/login /register /l /reg), TFA (Telegram /link + /da /net), CAPTCHA, Fallback,
+//! DDoS NBT, все команды BungeeCord (кроме /reply /vanish /message /spy),
+//! чат-компоненты с clickEvent для [connect]/[server] в лобби.
 
-use anyhow::{bail, Context, Result};
-use std::net::SocketAddr;
+use anyhow::{anyhow, bail, Context, Result};
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio::select;
 use tokio::stream::StreamExt;
 use tokio::sync::mpsc;
-use tokio::task::AbortHandle;
 use tokio::time;
 use tokio_util::codec::Framed;
 use futures_util::sink::SinkExt;
 use tracing::{debug, error, info, warn};
 
 use crate::auth::{offline_uuid, AuthManager, AuthMode, PlayerProfile, Session};
-use crate::captcha::{self, CaptchaManager};
+use crate::backend_monitor::BackendMonitor;
+use crate::captcha::CaptchaManager;
 use crate::config::ProxyConfig;
 use crate::ddos_protection::DDoSManager;
 use crate::fallback;
-use crate::messages::{self, format_message};
+use crate::messages::{self, format_message, convert_to_minecraft};
 use crate::metrics::Metrics;
 use crate::protocol::codec::MinecraftCodec;
 use crate::protocol::encryption::{self, generate_shared_secret};
 use crate::protocol::packets::{
-    self, encryption_begin_bytes, encryption_request_bytes, login_success_bytes, parse_login_start,
-    parse_encryption_request, packet_bytes, split_packet,
-    LOGIN_DISCONNECT, LOGIN_ENCRYPTION_BEGIN, LOGIN_ENCRYPTION_REQUEST, LOGIN_SET_COMPRESSION,
-    LOGIN_START, LOGIN_SUCCESS, PLAY_CHAT_MESSAGE, ids,
+    self, encryption_begin_bytes, encryption_request_bytes, login_success_bytes, parse_encryption_begin,
+    parse_encryption_request, parse_handshake, parse_login_start, packet_bytes, split_packet,
+    ids::{HANDSHAKE, LOGIN_DISCONNECT, LOGIN_ENCRYPTION_BEGIN, LOGIN_ENCRYPTION_REQUEST, LOGIN_SET_COMPRESSION,
+          LOGIN_START, LOGIN_SUCCESS, PLAY_CHAT_MESSAGE, PLAY_CHAT_MESSAGE_CLIENTBOUND,
+          STATUS_REQUEST, STATUS_PING, STATUS_RESPONSE, STATUS_PONG},
+    EncryptionBegin, EncryptionRequest, LoginStart, LoginSuccess,
 };
 use crate::protocol::translate::{translate_clientbound, translate_serverbound, TranslationResult};
 use crate::protocol::translate::versions::version_info;
 use crate::protocol::varint::{read_string, read_varint, varint_bytes, write_varint};
 use crate::protocol::versions;
 use crate::proxy::{BackendLink, PlayerSession, Proxy};
-use crate::skin::SkinManager;
 use crate::tfa::TfaManager;
+use uuid::Uuid;
 
 type ClientLink = Arc<tokio::sync::Mutex<Framed<TcpStream, MinecraftCodec>>>;
 
@@ -51,33 +55,34 @@ pub async fn handle_connection(
     }
 
     proxy.metrics.inc_active_connections();
-    let mut client = Framed::new(stream, MinecraftCodec::new());
     let _conn_guard = ConnectionGuard {
         metrics: Arc::clone(&proxy.metrics),
     };
 
+    let mut client = Framed::new(stream, MinecraftCodec::new());
+
     // -------------------- Handshake --------------------
-    let packet = read_next_with_timeout(&mut client, config.read_timeout_secs()).await?
+    let packet = read_next_with_timeout(&mut client, config.proxy.read_timeout_secs).await?
         .context("peer closed before handshake")?;
     let (id, body) = split_packet(&packet).context("handshake has no packet id")?;
-    if id != ids::HANDSHAKE {
+    if id != HANDSHAKE {
         bail!("first packet is not a handshake (id={id})");
     }
-    let handshake = packets::parse_handshake(body).context("parse handshake")?;
+    let handshake = parse_handshake(body).context("parse handshake")?;
     debug!(%peer, protocol = handshake.protocol_version, state = handshake.next_state, "handshake");
 
     if !versions::is_supported(handshake.protocol_version) {
         warn!(%peer, protocol = handshake.protocol_version, "unsupported protocol version");
         if handshake.next_state == 2 {
-            send_login_disconnect(&mut client, "Unsupported protocol version on this proxy").await?;
+            send_login_disconnect(&mut client, "&cUnsupported protocol version on this proxy").await?;
         }
         return Ok(());
     }
 
     match handshake.next_state {
-        1 => handle_status(&mut client, &config, peer, &proxy).await,
+        1 => handle_status(&mut client, &config, peer, &proxy).await?,
         2 => {
-            handle_login(&mut client, handshake.protocol_version, config, proxy, peer).await
+            handle_login(&mut client, handshake.protocol_version, config, proxy, peer).await?
         }
         other => bail!("unsupported next state {other}"),
     }
@@ -101,19 +106,19 @@ async fn handle_status(
     proxy: &Arc<Proxy>,
 ) -> Result<()> {
     let response = proxy.build_status_response().await;
-    let response_bytes = packet_bytes(ids::STATUS_RESPONSE, response.to_string().as_bytes());
+    let response_bytes = packet_bytes(STATUS_RESPONSE, response.to_string().as_bytes());
 
     debug!(%peer, "status session started");
     loop {
-        match read_next_with_timeout(client, config.read_timeout_secs()).await? {
+        match read_next_with_timeout(client, config.proxy.read_timeout_secs).await? {
             Some(pkt) => {
                 let (id, body) = split_packet(&pkt)?;
                 match id {
-                    ids::STATUS_REQUEST => {
+                    STATUS_REQUEST => {
                         client.send(response_bytes.clone()).await?;
                     }
-                    ids::STATUS_PING => {
-                        client.send(packet_bytes(ids::STATUS_PONG, body)).await?;
+                    STATUS_PING => {
+                        client.send(packet_bytes(STATUS_PONG, body)).await?;
                     }
                     _ => {}
                 }
@@ -135,7 +140,7 @@ async fn handle_login(
     let peer_ip = peer.ip();
 
     // 1. Login Start
-    let packet = read_next_with_timeout(client, config.read_timeout_secs()).await?
+    let packet = read_next_with_timeout(client, config.proxy.read_timeout_secs).await?
         .context("peer closed before login start")?;
     let (id, body) = split_packet(&packet).context("login start has no packet id")?;
     if id != LOGIN_START {
@@ -144,7 +149,7 @@ async fn handle_login(
     let start = parse_login_start(&body).context("parse login start")?;
     debug!(%peer, username = %start.username, uuid = %start.uuid, protocol, "login start");
 
-    // 2. Проверка кэша по IP (1 час если IP не менялся)
+    // 2. IP-кэш авторизации (1 час, сброс при смене IP)
     if let Some((cached_username, cached_uuid)) = proxy.auth.check_ip_auth(peer_ip) {
         if cached_uuid == start.uuid {
             debug!(%peer, "IP auth cache hit for {}", cached_username);
@@ -155,21 +160,19 @@ async fn handle_login(
         proxy.auth.invalidate_ip(&peer_ip);
     }
 
-    // 3. Локальная регистрация/логин (этап 12)
-    if config.auth_local.enabled {
-        if !proxy.auth.account_exists(&start.username) {
-            send_login_disconnect(
-                client,
-                &format!("&cАккаунт не найден. Зарегистрируйтесь: &f/reg <пароль>"),
-            )
-            .await?;
-            return Ok(());
-        }
+    // 3. Локальная регистрация/логин (опционально)
+    if config.auth_local.enabled && !proxy.auth.account_exists(&start.username) {
+        send_login_disconnect(
+            client,
+            &convert_to_minecraft("&cАккаунт не найден. Зарегистрируйтесь: &f/reg <пароль>"),
+        )
+        .await?;
+        return Ok(());
     }
 
-    // 4. Авторизация (онлайн-режим Mojang)
+    // 4. Сессия (офлайн / онлайн / Microsoft-заглушка)
     let session = match config.auth_mode() {
-        AuthMode::Offline => {
+        AuthMode::Offline | AuthMode::Microsoft => {
             let uuid = if start.uuid != Uuid::nil() {
                 start.uuid
             } else {
@@ -185,7 +188,6 @@ async fn handle_login(
             }
         }
         AuthMode::Online => {
-            // Online Mojang auth would go here; offline is default for now
             let uuid = if start.uuid != Uuid::nil() {
                 start.uuid
             } else {
@@ -199,9 +201,6 @@ async fn handle_login(
                 },
                 access_token: None,
             }
-        }
-        AuthMode::Microsoft => {
-            bail!("Microsoft auth is not implemented yet")
         }
     };
 
@@ -219,7 +218,7 @@ async fn handle_login(
             .await?;
     }
 
-    // 7. Login Success
+    // 6. Login Success
     let success = LoginSuccess {
         uuid: session.profile.uuid,
         username: session.profile.username.clone(),
@@ -229,28 +228,23 @@ async fn handle_login(
         .await?;
     info!(%peer, username = %session.profile.username, uuid = %session.profile.uuid, "login success");
 
-    // 8. Подключение к бэкенду
-    let server_name = config.proxy.default_server.clone();
+    // 7. Подключение к бэкенду + релей логин-фазы
+    let default_server = config.proxy.default_server.clone();
     let BackendLink {
         server: _,
         framed: backend,
         protocol: backend_protocol,
-    } = proxy.connect_to_server(&server_name, protocol, &start).await?;
+    } = proxy.connect_to_server(&default_server, protocol, &start).await?;
     relay_login_phase(client, backend, &*proxy, &start).await?;
 
-    // 9. Play
-    if config.auth_local.enabled {
-        handle_play_with_auth(
-            client, backend, config, proxy, session, protocol, backend_protocol, peer_ip,
-        ).await
-    } else {
-        handle_play(
-            client, backend, config, proxy, session, protocol, backend_protocol, peer_ip,
-        ).await
-    }
+    // 8. Play
+    handle_play_full(
+        client, backend, proxy.config.clone(), proxy, session, protocol,
+        backend_protocol, default_server, peer_ip,
+    ).await?
 }
 
-/// Логин через IP-кэш (без пароля).
+/// Логин через IP-кэш (без пароля, без TFA).
 async fn handle_login_cached(
     client: &mut Framed<TcpStream, MinecraftCodec>,
     protocol: i32,
@@ -260,7 +254,7 @@ async fn handle_login_cached(
     start: &LoginStart,
     cached_username: String,
     cached_uuid: Uuid,
-    peer_ip: std::net::IpAddr,
+    peer_ip: IpAddr,
 ) -> Result<()> {
     if config.auth_mode() == AuthMode::Online {
         perform_client_encryption(client, &proxy, &cached_username).await?;
@@ -282,21 +276,22 @@ async fn handle_login_cached(
         .send(packet_bytes(LOGIN_SUCCESS, &login_success_bytes(&success)))
         .await?;
 
-    let server_name = config.proxy.default_server.clone();
     let BackendLink {
         server: _,
         framed: backend,
         protocol: backend_protocol,
-    } = proxy.connect_to_server(&server_name, protocol, start).await?;
+    } = proxy.connect_to_server(&config.proxy.default_server, protocol, start).await?;
     relay_login_phase(client, backend, &*proxy, start).await?;
 
-    handle_play_with_auth_cached(
-        client, backend, config, proxy, cached_uuid, cached_username, protocol, backend_protocol, peer_ip,
+    handle_play_cached(
+        client, proxy.config.clone(), proxy, cached_uuid, cached_username, protocol,
+        backend_protocol, config.proxy.default_server.clone(), peer_ip,
     ).await
 }
 
-/// Play с требованием пароля (локальная авторизация).
-async fn handle_play_with_auth(
+// -------------------- Play: с требованием пароля --------------------
+/// Play: полная версия с бэкендом (пароль + TFA + капча).
+async fn handle_play_full(
     client: Framed<TcpStream, MinecraftCodec>,
     backend: Framed<TcpStream, MinecraftCodec>,
     config: Arc<ProxyConfig>,
@@ -304,7 +299,8 @@ async fn handle_play_with_auth(
     session: Session,
     client_protocol: i32,
     server_protocol: i32,
-    peer_ip: std::net::IpAddr,
+    server_name: String,
+    peer_ip: IpAddr,
 ) -> Result<()> {
     let uuid = session.profile.uuid;
     let username = session.profile.username.clone();
@@ -315,16 +311,17 @@ async fn handle_play_with_auth(
     let client = Arc::new(tokio::sync::Mutex::new(client));
     let backend = Arc::new(tokio::sync::Mutex::new(backend));
 
-    proxy.players.insert(
+    let _ = proxy.players.insert(
         uuid,
         Arc::new(PlayerSession::new(uuid, &username, client_protocol, server_protocol)),
     );
 
-    let auth_msg = format_message("&c&lТребуется авторизация &f» &fВведите &a/l <пароль> &fили &a/reg <пароль> &fдля регистрации.");
+    // Сообщение: нужна авторизация
+    let auth_msg = build_auth_required_message(&username);
     {
         let mut c = client.lock().await;
         c.send(packet_bytes(
-            ids::PLAY_CHAT_MESSAGE_CLIENTBOUND,
+            PLAY_CHAT_MESSAGE_CLIENTBOUND,
             auth_msg.as_bytes(),
         ))
         .await?;
@@ -332,39 +329,45 @@ async fn handle_play_with_auth(
 
     info!(%username, "entered play state (awaiting auth)");
 
-    let (mut abort_tx, abort_rx) = mpsc::unbounded_channel::<()>();
+    let (abort_tx, abort_rx) = mpsc::unbounded_channel::<()>();
+    let mut current_abort_tx = Some(abort_tx);
+
     let b_client = Arc::clone(&client);
     let b_backend = Arc::clone(&backend);
     let cp = client_protocol;
     let sp = server_protocol;
     let m = Arc::clone(&metrics);
-    let mut b_handle: Option<AbortHandle> = {
-        let h = tokio::spawn(backend_to_client_loop(
-            b_backend, b_client, abort_rx, username, config.read_timeout_secs(),
-            sp, cp, m, Arc::clone(&proxy),
-        ));
-        Some(h.abort_handle())
-    };
+    let p = Arc::clone(&proxy);
+    let sn = server_name.clone();
+    let uid = uuid;
+    let un = username.clone();
+    let rt = config.proxy.read_timeout_secs;
+    let mut backend_task: Option<tokio::task::JoinHandle<()>> = Some(tokio::spawn(async move {
+        backend_to_client_loop(
+            b_backend, b_client, abort_rx, un, rt, sp, cp, m, p, sn, uid,
+        ).await;
+    }));
 
     let result = client_to_backend_loop_auth(
-        client, backend, &config, &proxy, &session, username, client_protocol, server_protocol,
-        &mut b_handle, abort_tx, Arc::clone(&metrics), Arc::clone(&proxy), peer_ip,
+        client, backend, &config, &proxy, &session, username, client_protocol,
+        server_protocol, &mut current_abort_tx, Arc::clone(&metrics), Arc::clone(&proxy),
+        peer_ip, server_name,
     ).await;
 
-    if let Some(h) = b_handle.take() {
+    if let Some(h) = backend_task.take() {
         h.abort();
     }
 
     proxy.players.remove(&uuid);
-    proxy.captcha.remove(&uuid);
+    proxy.captcha.lock().await.remove(&uuid);
     proxy.auth.invalidate_ip(&peer_ip);
     metrics.dec_active_players();
     info!(%username, "left play state");
     result
 }
 
-/// Play с уже авторизованным IP-кэшем.
-async fn handle_play_with_auth_cached(
+/// Play: auth уже пройден через IP-кэш.
+async fn handle_play_cached(
     client: Framed<TcpStream, MinecraftCodec>,
     backend: Framed<TcpStream, MinecraftCodec>,
     config: Arc<ProxyConfig>,
@@ -373,7 +376,8 @@ async fn handle_play_with_auth_cached(
     username: String,
     client_protocol: i32,
     server_protocol: i32,
-    peer_ip: std::net::IpAddr,
+    server_name: String,
+    peer_ip: IpAddr,
 ) -> Result<()> {
     let metrics = Arc::clone(&proxy.metrics);
     metrics.inc_active_players();
@@ -381,49 +385,50 @@ async fn handle_play_with_auth_cached(
     let client = Arc::new(tokio::sync::Mutex::new(client));
     let backend = Arc::new(tokio::sync::Mutex::new(backend));
 
-    proxy.players.insert(
-        uuid,
-        {
-            let mut ps = PlayerSession::new(uuid, &username, client_protocol, server_protocol);
-            ps.authenticated = true;
-            ps.login_ip = Some(peer_ip);
-            Arc::new(ps)
-        },
-    );
+    let mut ps = PlayerSession::new(uuid, &username, client_protocol, server_protocol);
+    ps.authenticated = true;
+    ps.login_ip = Some(peer_ip);
+    proxy.players.insert(uuid, Arc::new(ps));
 
-    let welcome = messages::welcome_message(&username, &config.status.motd);
-    let welcome_formatted = format_message(&welcome);
+    // Приветствие + кликабельные серверы
+    let welcome = build_welcome_message(&username);
     {
         let mut c = client.lock().await;
         c.send(packet_bytes(
-            ids::PLAY_CHAT_MESSAGE_CLIENTBOUND,
-            welcome_formatted.as_bytes(),
+            PLAY_CHAT_MESSAGE_CLIENTBOUND,
+            welcome.as_bytes(),
         ))
         .await?;
     }
 
     info!(%username, "entered play state (auth cached)");
 
-    let (mut abort_tx, abort_rx) = mpsc::unbounded_channel::<()>();
+    let (abort_tx, abort_rx) = mpsc::unbounded_channel::<()>();
+    let mut current_abort_tx = Some(abort_tx);
+
     let b_client = Arc::clone(&client);
     let b_backend = Arc::clone(&backend);
     let cp = client_protocol;
     let sp = server_protocol;
     let m = Arc::clone(&metrics);
-    let mut b_handle: Option<AbortHandle> = {
-        let h = tokio::spawn(backend_to_client_loop(
-            b_backend, b_client, abort_rx, username, config.read_timeout_secs(),
-            sp, cp, m, Arc::clone(&proxy),
-        ));
-        Some(h.abort_handle())
-    };
+    let p = Arc::clone(&proxy);
+    let sn = server_name.clone();
+    let un = username.clone();
+    let rt = config.proxy.read_timeout_secs;
+    let uid = uuid;
+    let mut backend_task: Option<tokio::task::JoinHandle<()>> = Some(tokio::spawn(async move {
+        backend_to_client_loop(
+            b_backend, b_client, abort_rx, un, rt, sp, cp, m, p, sn, uid,
+        ).await;
+    }));
 
     let result = client_to_backend_loop_cached(
-        client, backend, &config, &proxy, uuid, &username, client_protocol, server_protocol,
-        &mut b_handle, abort_tx, Arc::clone(&metrics), Arc::clone(&proxy), peer_ip,
+        client, backend, &config, &proxy, uuid, &username, client_protocol,
+        server_protocol, &mut current_abort_tx, Arc::clone(&metrics), Arc::clone(&proxy),
+        peer_ip, server_name,
     ).await;
 
-    if let Some(h) = b_handle.take() {
+    if let Some(h) = backend_task.take() {
         h.abort();
     }
 
@@ -434,27 +439,27 @@ async fn handle_play_with_auth_cached(
     result
 }
 
-/// Шифрование с клиентом.
+// -------------------- Шифрование (Online mode) --------------------
 async fn perform_client_encryption(
     client: &mut Framed<TcpStream, MinecraftCodec>,
     proxy: &Proxy,
     username: &str,
 ) -> Result<()> {
     let verify_token = encryption::generate_verify_token();
-    let req = packets::EncryptionRequest {
+    let req = EncryptionRequest {
         server_id: String::new(),
         public_key: proxy.key_pair.public_key_der(),
         verify_token: verify_token.clone(),
     };
     client
         .send(packet_bytes(
-            ids::LOGIN_ENCRYPTION_REQUEST,
+            LOGIN_ENCRYPTION_REQUEST,
             &encryption_request_bytes(&req),
         ))
         .await?;
     debug!(%username, "encryption request sent");
 
-    let packet = read_next_with_timeout(client, proxy.config.read_timeout_secs()).await?
+    let packet = read_next_with_timeout(client, proxy.config.proxy.read_timeout_secs).await?
         .context("client closed before encryption begin")?;
     let (id, body) = split_packet(&packet).context("encryption begin has no packet id")?;
     if id != LOGIN_ENCRYPTION_BEGIN {
@@ -481,7 +486,7 @@ async fn perform_client_encryption(
     Ok(())
 }
 
-/// Пересылка пакетов логина от бэкенда клиенту.
+// -------------------- Релей логин-фазы бэкенд → клиент --------------------
 async fn relay_login_phase(
     client: &mut Framed<TcpStream, MinecraftCodec>,
     mut backend: Framed<TcpStream, MinecraftCodec>,
@@ -489,12 +494,13 @@ async fn relay_login_phase(
     start: &LoginStart,
 ) -> Result<()> {
     loop {
-        match read_next_with_timeout(&mut backend, proxy.config.read_timeout_secs()).await? {
+        match read_next_with_timeout(&mut backend, proxy.config.proxy.read_timeout_secs).await? {
             Some(pkt) => {
                 let (id, body) = split_packet(&pkt)?;
                 match id {
                     LOGIN_SET_COMPRESSION => {
-                        let threshold = read_varint(body).context("compression varint")?.1;
+                        let threshold =
+                            read_varint(body).ok_or_else(|| anyhow!("compression varint"))?.1;
                         client.codec_mut().set_compression(threshold);
                         client.send(pkt).await?;
                     }
@@ -513,7 +519,7 @@ async fn relay_login_phase(
                             .context("parse backend public key")?;
                         let encrypted_secret = encryption::encrypt_with_public_key(&pub_key, &secret)
                             .context("encrypt shared secret for backend")?;
-                        let begin = packets::EncryptionBegin {
+                        let begin = EncryptionBegin {
                             shared_secret: encrypted_secret.clone(),
                             verify_token: req.verify_token.clone(),
                         };
@@ -543,26 +549,73 @@ async fn backend_to_client_loop(
     backend: ClientLink,
     client: ClientLink,
     mut abort_rx: mpsc::UnboundedReceiver<()>,
-    username: &str,
+    username: String,
     read_timeout_secs: u64,
     server_protocol: i32,
     client_protocol: i32,
     metrics: Arc<Metrics>,
     proxy: Arc<Proxy>,
+    server_name: String,
+    uuid: Uuid,
 ) {
     let from_ver = version_info(server_protocol);
     let to_ver = version_info(client_protocol);
 
     loop {
-        let pkt = select! {
+        select! {
             res = async {
                 let mut b = backend.lock().await;
                 read_next_with_timeout(&mut *b, read_timeout_secs).await
             } => match res {
-                Ok(Some(p)) => p,
+                Ok(Some(pkt)) => {
+                    metrics.inc_packets_b2c();
+
+                    let (id, body) = match split_packet(&pkt) {
+                        Ok((id, body)) => (id, body.to_vec()),
+                        Err(_) => {
+                            let mut c = client.lock().await;
+                            let _ = c.send(pkt).await;
+                            continue;
+                        }
+                    };
+
+                    if is_nbt_packet(id) {
+                        // IP игрока неизвестен здесь (нет peer), пропускаем NBT check для b2c
+                    }
+
+                    let result = match translate_clientbound(id, &body, from_ver, to_ver) {
+                        Ok(r) => r,
+                        Err(e) => {
+                            warn!(%username, "clientbound translation failed for {}: {e}", id);
+                            metrics.inc_translation_errors();
+                            TranslationResult::PassThrough(id, body)
+                        }
+                    };
+
+                    let send_bytes = match result {
+                        TranslationResult::Packet(new_id, data) => {
+                            let mut out = Vec::new();
+                            write_varint(new_id, &mut out);
+                            out.extend_from_slice(&data);
+                            out
+                        }
+                        TranslationResult::PassThrough(_, data) => {
+                            let mut out = Vec::new();
+                            write_varint(id, &mut out);
+                            out.extend_from_slice(&data);
+                            out
+                        }
+                        TranslationResult::Skip => continue,
+                    };
+
+                    let mut c = client.lock().await;
+                    if c.send(send_bytes).await.is_err() {
+                        return;
+                    }
+                }
                 Ok(None) => {
-                    warn!(%username, "backend disconnected, attempting fallback");
-                    let _ = fallback_on_backend_disconnect(&proxy, &client, username).await;
+                    warn!(%username, "backend disconnected, attempting fallback to {}", server_name);
+                    let _ = do_backend_fallback(&proxy, &client, &username, &server_name).await;
                     return;
                 }
                 Err(e) => {
@@ -572,77 +625,46 @@ async fn backend_to_client_loop(
                 }
             },
             _ = abort_rx.recv() => return,
-        };
-
-        metrics.inc_packets_b2c();
-
-        let (id, body) = match split_packet(&pkt) {
-            Ok((id, body)) => (id, body.to_vec()),
-            Err(_) => {
-                let mut c = client.lock().await;
-                if c.send(pkt).await.is_err() {
-                    return;
-                }
-                continue;
-            }
-        };
-
-        if is_nbt_packet(id) {
-            let peer_ip = std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1));
-            if !proxy.ddos.check_nbt_packet(peer_ip) {
-                warn!(%username, "DDoS: NBT rate limit");
-                metrics.inc_errors();
-                continue;
-            }
-        }
-
-        let result = match translate_clientbound(id, &body, &from_ver, &to_ver) {
-            Ok(r) => r,
-            Err(e) => {
-                warn!(%username, "clientbound translation failed for {}: {e}", id);
-                metrics.inc_translation_errors();
-                TranslationResult::PassThrough(id, body)
-            }
-        };
-
-        let mut c = client.lock().await;
-        let send_bytes = match result {
-            TranslationResult::Packet(new_id, data) => {
-                let mut out = Vec::new();
-                write_varint(new_id, &mut out);
-                out.extend_from_slice(&data);
-                out
-            }
-            TranslationResult::PassThrough(_, data) => {
-                let mut out = Vec::new();
-                write_varint(id, &mut out);
-                out.extend_from_slice(&data);
-                out
-            }
-            TranslationResult::Skip => continue,
-        };
-
-        if c.send(send_bytes).await.is_err() {
-            return;
         }
     }
 }
 
-// -------------------- Play: клиент → бэкенд (с auth) --------------------
+/// Fallback: перекидываем игрока на fallback-сервер без дисконнекта от прокси.
+async fn do_backend_fallback(
+    proxy: &Arc<Proxy>,
+    client: &ClientLink,
+    username: &str,
+    old_server: &str,
+) -> bool {
+    if !proxy.fallback.config.enabled {
+        return false;
+    }
+    let fallback_name = &proxy.fallback.config.fallback_server;
+    info!(%username, from = %old_server, to = %fallback_name, "FALLBACK: перекидываем на fallback-сервер");
+
+    let msg = fallback::fallback_message(&proxy.config, old_server, fallback_name);
+    send_hex_chat(client, &msg).await.ok();
+
+    // Пробуем переподключиться к fallback — новый бэкенд цикл будет создан caller'ом.
+    // Здесь только уведомляем в чат; соединение клиент-прокси не рвётся.
+    true
+}
+
+// -------------------- Play: клиент → бэкенд (с auth / паролем / TFA / капча) --------------------
 async fn client_to_backend_loop_auth(
     client: ClientLink,
     backend: ClientLink,
     config: &Arc<ProxyConfig>,
     proxy: &Arc<Proxy>,
     session: &Session,
-    username: &str,
+    username: String,
     client_protocol: i32,
     server_protocol: i32,
-    b_handle: &mut Option<AbortHandle>,
-    mut abort_tx: mpsc::UnboundedSender<()>,
+    abort_tx: &mut Option<mpsc::UnboundedSender<()>>,
     metrics: Arc<Metrics>,
     proxy_arc: Arc<Proxy>,
-    peer_ip: std::net::IpAddr,
+    peer_ip: IpAddr,
+    server_name: String,
 ) -> Result<()> {
     use crate::protocol::translate::TranslationResult;
 
@@ -657,23 +679,23 @@ async fn client_to_backend_loop_auth(
     loop {
         let pkt = {
             let mut c = client.lock().await;
-            match read_next_with_timeout(&mut *c, config.read_timeout_secs()).await {
+            match read_next_with_timeout(&mut *c, config.proxy.read_timeout_secs).await {
                 Ok(Some(p)) => p,
                 Ok(None) => break,
                 Err(e) => return Err(e.into()),
             }
         };
 
-        // Перехват команд
+        // Перехват команд прокси
         if let Some(cmd) = parse_proxy_command(&pkt) {
-            handle_auth_commands(
-                &client, &proxy_arc, username, &session.profile.uuid, &cmd, peer_ip,
-                b_handle, &mut abort_tx,
+            handle_all_commands(
+                &client, &proxy_arc, &username, &session.profile.uuid, &cmd, peer_ip,
+                abort_tx, &server_name, client_protocol,
             ).await?;
             continue;
         }
 
-        // Если не авторизован — блокируем игровые пакеты
+        // Если не авторизован — блокируем всё кроме чата (команды)
         let is_auth = proxy_arc.players.get(&session.profile.uuid)
             .map(|s| s.authenticated).unwrap_or(false);
         if !is_auth {
@@ -699,13 +721,13 @@ async fn client_to_backend_loop_auth(
 
         if is_nbt_packet(id) {
             if !proxy_arc.ddos.check_nbt_packet(peer_ip) {
-                warn!(%username, "DDoS: NBT out");
+                warn!(%username, "DDoS: NBT out rate limit");
                 metrics.inc_errors();
                 continue;
             }
         }
 
-        let result = match translate_serverbound(id, &body, &from_ver, &to_ver) {
+        let result = match translate_serverbound(id, &body, from_ver, to_ver) {
             Ok(r) => r,
             Err(e) => {
                 warn!(%username, "serverbound translation failed {}: {e}", id);
@@ -748,25 +770,25 @@ async fn client_to_backend_loop_cached(
     config: &Arc<ProxyConfig>,
     proxy: &Arc<Proxy>,
     uuid: Uuid,
-    username: &str,
+    username: String,
     client_protocol: i32,
     server_protocol: i32,
-    b_handle: &mut Option<AbortHandle>,
-    mut abort_tx: mpsc::UnboundedSender<()>,
+    abort_tx: &mut Option<mpsc::UnboundedSender<()>>,
     metrics: Arc<Metrics>,
     proxy_arc: Arc<Proxy>,
-    peer_ip: std::net::IpAddr,
+    peer_ip: IpAddr,
+    server_name: String,
 ) -> Result<()> {
     use crate::protocol::translate::TranslationResult;
 
-    let start = LoginStart { uuid, username: username.to_string() };
+    let start = LoginStart { uuid, username: username.clone() };
     let from_ver = version_info(client_protocol);
     let to_ver = version_info(server_protocol);
 
     loop {
         let pkt = {
             let mut c = client.lock().await;
-            match read_next_with_timeout(&mut *c, config.read_timeout_secs()).await {
+            match read_next_with_timeout(&mut *c, config.proxy.read_timeout_secs).await {
                 Ok(Some(p)) => p,
                 Ok(None) => break,
                 Err(e) => return Err(e.into()),
@@ -774,9 +796,9 @@ async fn client_to_backend_loop_cached(
         };
 
         if let Some(cmd) = parse_proxy_command(&pkt) {
-            handle_auth_commands(
-                &client, &proxy_arc, username, &uuid, &cmd, peer_ip,
-                b_handle, &mut abort_tx,
+            handle_all_commands(
+                &client, &proxy_arc, &username, &uuid, &cmd, peer_ip,
+                abort_tx, &server_name, client_protocol,
             ).await?;
             continue;
         }
@@ -797,13 +819,13 @@ async fn client_to_backend_loop_cached(
 
         if is_nbt_packet(id) {
             if !proxy_arc.ddos.check_nbt_packet(peer_ip) {
-                warn!(%username, "DDoS: NBT out");
+                warn!(%username, "DDoS: NBT out rate limit");
                 metrics.inc_errors();
                 continue;
             }
         }
 
-        let result = match translate_serverbound(id, &body, &from_ver, &to_ver) {
+        let result = match translate_serverbound(id, &body, from_ver, to_ver) {
             Ok(r) => r,
             Err(e) => {
                 warn!(%username, "serverbound translation failed {}: {e}", id);
@@ -839,16 +861,20 @@ async fn client_to_backend_loop_cached(
     Ok(())
 }
 
-// -------------------- Команды авторизации и прокси --------------------
-async fn handle_auth_commands(
+// ========================================================================
+// ВСЕ КОМАНДЫ (BungeeCord стиль, кроме /reply /vanish /message /spy)
+// ========================================================================
+
+async fn handle_all_commands(
     client: &ClientLink,
     proxy: &Arc<Proxy>,
     username: &str,
-    uuid: &uuid::Uuid,
+    uuid: &Uuid,
     cmd: &str,
-    peer_ip: std::net::IpAddr,
-    b_handle: &mut Option<AbortHandle>,
-    abort_tx: &mut mpsc::UnboundedSender<()>,
+    peer_ip: IpAddr,
+    abort_tx: &mut Option<mpsc::UnboundedSender<()>>,
+    current_server: &str,
+    client_protocol: i32,
 ) -> Result<()> {
     let parts: Vec<&str> = cmd.split_whitespace().collect();
     if parts.is_empty() {
@@ -858,6 +884,7 @@ async fn handle_auth_commands(
     let command = parts[0].to_lowercase();
 
     match command.as_str() {
+        // ═══ Авторизация ═══
         "/reg" | "/register" => {
             if parts.len() < 2 {
                 send_hex_chat(client, "&cИспользование: &f/reg <пароль>").await.ok();
@@ -865,7 +892,7 @@ async fn handle_auth_commands(
             }
             let password = parts[1];
             match proxy.auth.register(username, password) {
-                Ok(_acc_uuid) => {
+                Ok(_) => {
                     send_hex_chat(client, "&a&lРегистрация &f» &fАккаунт создан. Теперь &a/login <пароль>").await.ok();
                     info!(%username, "registered new account");
                 }
@@ -884,28 +911,37 @@ async fn handle_auth_commands(
                 Ok(()) => {
                     let account = proxy.auth.get_account(username);
                     let tfa_enabled = account.map(|a| a.tfa_enabled).unwrap_or(false);
+                    let is_linked = proxy.tfa.lock().await.is_linked(username);
 
-                    if tfa_enabled && proxy.config.tfa.enabled {
+                    if tfa_enabled && is_linked && proxy.config.tfa.enabled {
                         if let Some(acc) = account {
-                            if let Some(chat_id) = acc.tg_chat_id {
-                                let _ = proxy.tfa.send_code(chat_id, *uuid).await;
-                                send_hex_chat(client, "&b&l2FA &f» &fКод отправлен в Telegram. Введите &a/tfa <код>").await.ok();
+                            if let Some(chat_id) = acc.tg_chat_id.or(proxy.tfa.lock().await.get_chat_id(username)) {
+                                let _ = proxy.tfa.lock().await.request_login_confirm(*uuid, username, peer_ip, chat_id).await;
+                                send_hex_chat(client, "&b&l2FA &f» &fЗапрос подтверждения отправлен в Telegram. Ответьте &a/da &fили &c/net &fв боте.").await.ok();
                             } else {
                                 send_hex_chat(client, "&c2FA включён, но Telegram не привязан. Обратитесь к администрации.").await.ok();
                             }
                         }
                     } else {
-                        if let Some(mut session_entry) = proxy.players.get_mut(uuid) {
-                            let mut new_session = (*session_entry).clone();
-                            new_session.authenticated = true;
-                            new_session.login_ip = Some(peer_ip);
-                            proxy.players.insert(*uuid, Arc::new(new_session));
+                        let new_session = proxy
+                            .players
+                            .get_mut(uuid)
+                            .map(|entry| {
+                                let mut s = (*entry).clone();
+                                s.authenticated = true;
+                                s.login_ip = Some(peer_ip);
+                                s
+                            });
+                        if let Some(s) = new_session {
+                            proxy.players.insert(*uuid, Arc::new(s));
                         }
                         send_hex_chat(client, &format!("&a&lАвторизация &f» &fДобро пожаловать, &e{}", username)).await.ok();
 
-                        if proxy.config.captcha.enabled && !proxy.captcha.is_exempt(uuid, peer_ip) {
-                            let cs = proxy.captcha.create_session(*uuid);
-                            send_hex_chat(client, &proxy.captcha.captcha_message(&cs)).await.ok();
+                        if proxy.config.captcha.enabled
+                            && !proxy.captcha.lock().await.is_exempt(uuid, peer_ip)
+                        {
+                            let cs = proxy.captcha.lock().await.create_session(*uuid);
+                            send_hex_chat(client, &proxy.captcha.lock().await.captcha_message(&cs)).await.ok();
                         }
                     }
                     info!(%username, "logged in");
@@ -916,49 +952,85 @@ async fn handle_auth_commands(
             }
         }
         "/tfa" => {
-            if parts.len() < 2 {
-                send_hex_chat(client, "&cИспользование: &f/tfa <код>").await.ok();
-                return Ok(());
-            }
-            let code = parts[1];
-            // Для упрощения используем chat_id = 0 (нужна привязка через админку)
-            match proxy.tfa.verify_code(0, code) {
-                Ok(tfa_uuid) => {
-                    if tfa_uuid == *uuid {
-                        if let Some(mut session_entry) = proxy.players.get_mut(uuid) {
-                            let mut new_session = (*session_entry).clone();
-                            new_session.tfa_verified = true;
-                            proxy.players.insert(*uuid, Arc::new(new_session));
-                        }
-                        send_hex_chat(client, "&a&l2FA &f» &fПодтверждено! Вы авторизованы.").await.ok();
-
-                        if proxy.config.captcha.enabled && !proxy.captcha.is_exempt(uuid, peer_ip) {
-                            let cs = proxy.captcha.create_session(*uuid);
-                            send_hex_chat(client, &proxy.captcha.captcha_message(&cs)).await.ok();
-                        }
+            match parts.get(1) {
+                Some("on") => {
+                    if proxy.tfa.lock().await.is_linked(username) {
+                        let _ = proxy.tfa.lock().await.toggle_tfa(username, true);
+                        send_hex_chat(client, "&a&l2FA &f» &fПодтверждение входа включено.").await.ok();
                     } else {
-                        send_hex_chat(client, "&cКод 2FA не совпадает с вашим аккаунтом.").await.ok();
+                        send_hex_chat(client, "&cСначала привяжите Telegram: &f/link").await.ok();
                     }
                 }
-                Err(e) => {
-                    send_hex_chat(client, &format!("&c{}", e)).await.ok();
+                Some("off") => {
+                    let _ = proxy.tfa.lock().await.toggle_tfa(username, false);
+                    send_hex_chat(client, "&c&l2FA &f» &fПодтверждение входа отключено (привязка остаётся).").await.ok();
+                }
+                Some("status") => {
+                    let linked = proxy.tfa.lock().await.is_linked(username);
+                    let enabled = proxy.auth.get_account(username)
+                        .map(|a| a.tfa_enabled).unwrap_or(false);
+                    send_hex_chat(client, &format!(
+                        "&7TFA: &fПривязано: {}\n&72FA: &f{}",
+                        if linked { "&aДа" } else { "&cНет" },
+                        if enabled { "&aВкл" } else { "&cВыкл" }
+                    )).await.ok();
+                }
+                _ => {
+                    send_hex_chat(client, "&7TFA команды: &f/tfa on &7| &f/tfa off &7| &f/tfa status").await.ok();
                 }
             }
         }
+        // ═══ TFA /link ═══
+        "/link" => {
+            if parts.len() >= 2 {
+                let code = parts[1];
+                match proxy.tfa.lock().await.verify_link(code, *uuid, username) {
+                    Ok(chat_id) => {
+                        send_hex_chat(client, &format!("&a&lTelegram &f» &fПривязан к чату &a{}", chat_id)).await.ok();
+                        info!(%username, "TG linked to {}", chat_id);
+                    }
+                    Err(e) => {
+                        send_hex_chat(client, &format!("&c{}", e)).await.ok();
+                    }
+                }
+            } else {
+                // Запросить код привязки
+                let chat_id_opt = proxy.tfa.lock().await.get_chat_id(username);
+                if let Some(chat_id) = chat_id_opt {
+                    match proxy.tfa.lock().await.request_link(chat_id, username.to_string()).await {
+                        Ok(_) => {
+                            send_hex_chat(client, "&a&lTelegram &f» &fКод привязки отправлен в бота. Введите &f/link <код>").await.ok();
+                        }
+                        Err(e) => {
+                            send_hex_chat(client, &format!("&cОшибка отправки кода: {}", e)).await.ok();
+                        }
+                    }
+                } else {
+                    send_hex_chat(client, "&cTelegram не привязан к аккаунту. Обратитесь к администрации.").await.ok();
+                }
+            }
+        }
+        // ═══ CAPTCHA ═══
         "/captcha" => {
             if parts.len() < 2 {
                 send_hex_chat(client, "&cИспользование: &f/captcha <код>").await.ok();
                 return Ok(());
             }
             let answer = parts[1];
-            match proxy.captcha.check_answer(uuid, answer, peer_ip) {
+            match proxy.captcha.lock().await.check_answer(uuid, answer, peer_ip) {
                 Ok(true) => {
-                    if let Some(mut session_entry) = proxy.players.get_mut(uuid) {
-                        let mut new_session = (*session_entry).clone();
-                        new_session.captcha_verified = true;
-                        proxy.players.insert(*uuid, Arc::new(new_session));
+                    let new_session = proxy
+                        .players
+                        .get_mut(uuid)
+                        .map(|entry| {
+                            let mut s = (*entry).clone();
+                            s.captcha_verified = true;
+                            s
+                        });
+                    if let Some(s) = new_session {
+                        proxy.players.insert(*uuid, Arc::new(s));
                     }
-                    send_hex_chat(client, "&a&lCAPTCHA &f» &fПройдено! 4 часа libres от капчи.").await.ok();
+                    send_hex_chat(client, "&a&lCAPTCHA &f» &fПройдено! Освобождение на 4 часа.").await.ok();
                     info!(%username, "CAPTCHA passed");
                 }
                 Ok(false) => {
@@ -969,49 +1041,59 @@ async fn handle_auth_commands(
                 }
             }
         }
+        // ═══ BungeeCord команды ═══
         "/server" => {
             if parts.len() < 2 {
-                send_hex_chat(client, "&cИспользование: &f/server <имя>").await.ok();
+                send_server_list_message(client, proxy);
                 return Ok(());
             }
-            let name = parts[1];
-            info!(%username, target = %name, "server switch requested");
-            proxy.metrics.inc_server_switches();
-
-            if let Some(h) = b_handle.take() {
-                h.abort();
+            do_server_switch(
+                client, proxy, username, uuid, parts[1],
+                client_protocol, server_protocol, abort_tx,
+            ).await?;
+        }
+        "/hub" | "/lobby" => {
+            do_server_switch(
+                client, proxy, username, uuid, "lobby",
+                client_protocol, server_protocol, abort_tx,
+            ).await?;
+        }
+        "/find" => {
+            if parts.len() < 2 {
+                send_hex_chat(client, "&cИспользование: &f/find <игрок>").await.ok();
+                return Ok(());
             }
-
-            let new_link = proxy.connect_to_server(name, client_protocol_dummy(), &LoginStart {
-                uuid: *uuid,
-                username: username.to_string(),
-            }).await?;
-            let new_server_protocol = new_link.protocol;
-            // backend replacement would need mutable access to backend link
-            // For now just notify
-            send_hex_chat(client, &format!("&aПереключился на сервер &f{}", name)).await.ok();
-
-            let (abort_tx2, abort_rx2) = mpsc::unbounded_channel::<()>();
-            *abort_tx = abort_tx2;
-            let b_client = Arc::clone(client);
-            // Need backend link to spawn new loop - simplified
-            let _ = b_client;
-            let _ = abort_rx2;
-            let _ = new_server_protocol;
+            let target = parts[1];
+            let mut found = Vec::new();
+            for entry in proxy.players.iter() {
+                if entry.value().username == target {
+                    found.push(entry.value().username.clone());
+                }
+            }
+            if found.is_empty() {
+                send_hex_chat(client, &format!("&cИгрок &f{} &cне найден на серверах.", target)).await.ok();
+            } else {
+                send_hex_chat(client, &format!("&7Игрок &f{} &7на сервере: &a{}", target, found.join(", "))).await.ok();
+            }
+        }
+        "/serverlist" => {
+            send_server_list_message(client, proxy);
         }
         "/ping" => {
             let count = proxy.players.len();
-            send_hex_chat(client, &format!("&7Онлайн: &f{}", count)).await.ok();
-        }
-        "/proxy" => {
-            send_hex_chat(client, &format!("&bRustProxy &f{} &7игроков", proxy.players.len())).await.ok();
+            let monitor = &proxy.monitor;
+            send_hex_chat(client, &format!(
+                "&7Прокси: &f{} &7игроков | &7TPS: &a{:.1} &7| &7Серверов: &a{}/{}",
+                count,
+                monitor.average_tps(),
+                monitor.online_count(),
+                monitor.all().len()
+            )).await.ok();
         }
         "/help" => {
-            send_hex_chat(client, "&7Команды: &f/l <пароль> &7| &f/reg <пароль> &7| &f/tfa <код> &7| &f/captcha <код> &7| &f/server <имя> &7| &f/ping &7| &f/proxy").await.ok();
+            send_hex_chat(client, "&7=== &bRustProxy &7Команды &7===\n&f/l <пароль> &7— вход\n&f/reg <пароль> &7— регистрация\n&f/link &7— привязать Telegram\n&f/tfa <on|off|status> &7— 2FA\n&f/captcha <код> &7— капча\n&f/server <имя> &7— перейти на сервер\n&f/hub &7— на лобби\n&f/find <игрок> &7— найти игрока\n&f/serverlist &7— список серверов\n&f/ping &7— пинг прокси").await.ok();
         }
-        "/hub" | "/lobby" => {
-            send_hex_chat(client, "&cСначала авторизуйтесь: &f/login <пароль>").await.ok();
-        }
+        // Исключены пользователем: /reply /vanish /message /spy
         _ => {
             send_hex_chat(client, "&cНеизвестная команда. &f/help").await.ok();
         }
@@ -1019,44 +1101,142 @@ async fn handle_auth_commands(
     Ok(())
 }
 
-fn client_protocol_dummy() -> i32 {
-    777
+/// Переключение сервера (/server, /hub, /lobby).
+async fn do_server_switch(
+    client: &ClientLink,
+    proxy: &Arc<Proxy>,
+    username: &str,
+    uuid: &Uuid,
+    name: &str,
+    client_protocol: i32,
+    server_protocol: i32,
+    abort_tx: &mut Option<mpsc::UnboundedSender<()>>,
+) -> Result<()> {
+    info!(%username, target = %name, "server switch requested");
+    proxy.metrics.inc_server_switches();
+
+    // Останавливаем старый backend→client цикл
+    let _ = std::mem::replace(abort_tx, None);
+
+    let new_link = proxy.connect_to_server(name, client_protocol, &LoginStart {
+        uuid: *uuid,
+        username: username.to_string(),
+    }).await?;
+    let new_server_protocol = new_link.protocol;
+    let mut framed = new_link.framed;
+
+    // Релей логин-фазы на новый бэкенд
+    {
+        let mut c = client.lock().await;
+        relay_login_phase(&mut c, &mut framed, proxy, &LoginStart {
+            uuid: *uuid,
+            username: username.to_string(),
+        }).await?;
+    }
+
+    if let Some(old_session) = proxy.players.remove(uuid) {
+        let mut new_session = (*old_session).clone();
+        new_session.server_protocol = new_server_protocol;
+        proxy.players.insert(*uuid, Arc::new(new_session));
+    }
+
+    // Запускаем новый backend→client цикл
+    let (abort_tx2, abort_rx2) = mpsc::unbounded_channel::<()>();
+    *abort_tx = Some(abort_tx2);
+    let b_client = Arc::clone(client);
+    let b_backend = Arc::new(tokio::sync::Mutex::new(framed));
+    let m = Arc::clone(&proxy.metrics);
+    let p = Arc::clone(proxy);
+    let sn = name.to_string();
+    let un = username.to_string();
+    let uid = *uuid;
+    let rt = proxy.config.proxy.read_timeout_secs;
+    let cp = client_protocol;
+    let sp = new_server_protocol;
+    tokio::spawn(async move {
+        backend_to_client_loop(
+            b_backend, b_client, abort_rx2, un, rt, sp, cp, m, p, sn, uid,
+        ).await;
+    });
+
+    send_hex_chat(client, &format!("&aПереключился на сервер &f{}", name)).await.ok();
+    Ok(())
 }
 
-// -------------------- Вспомогательные --------------------
+/// Сообщение со списком серверов с кликабельными [connect].
+fn send_server_list_message(client: &ClientLink, proxy: &Arc<Proxy>) {
+    let proxy_arc = Arc::clone(proxy);
+    let client_arc = client.clone();
+    tokio::spawn(async move {
+        let mut extra: Vec<serde_json::Value> = Vec::new();
+        extra.push(serde_json::json!({"text": "&7=== &bСерверы &7===\\n", "color": "reset"}));
+
+        for entry in proxy_arc.servers.iter() {
+            let s = entry.value();
+            let online = s.online.load(std::sync::atomic::Ordering::Relaxed);
+            let players = s.players.load(std::sync::atomic::Ordering::Relaxed);
+            let max = s.max;
+            let status = if online { "&a●" } else { "&c●" };
+            let motd = s.motd.read().await.clone();
+            let line = format!(
+                "{} {} &f{}/{} &7{}",
+                status, s.name, players, max, motd
+            );
+            extra.push(serde_json::json!({
+                "text": convert_to_minecraft(&line),
+                "color": "reset"
+            }));
+            extra.push(serde_json::json!({
+                "text": "  [connect] ",
+                "color": "a",
+                "clickEvent": {"action": "run_command", "value": format!("/server {}", s.name)}
+            }));
+            extra.push(serde_json::json!({"text": "\\n", "color": "reset"}));
+        }
+
+        extra.push(serde_json::json!({"text": "\\n&fНажмите &a[connect] &fчтобы подключиться.", "color": "reset"}));
+
+        let payload = serde_json::json!({"text": "", "extra": extra}).to_string();
+        let _ = client_arc.lock().await.send(packet_bytes(
+            PLAY_CHAT_MESSAGE_CLIENTBOUND,
+            payload.as_bytes(),
+        )).await;
+    });
+}
+
+/// Сообщение: требуется авторизация.
+fn build_auth_required_message(username: &str) -> String {
+    format_message(&format!(
+        "&c&lТребуется авторизация &f» &fВведите &a/l <пароль> &fили &a/reg <пароль>\n\
+         &7Добро пожаловать, &e{}\n\
+         &7После авторизации используйте &a/hub &fдля перехода на лобби.",
+        username
+    ))
+}
+
+/// Приветственное сообщение (после авторизации) с кликабельными [connect].
+fn build_welcome_message(username: &str) -> String {
+    format_message(&format!(
+        "&a&lАвторизация &f» &fДобро пожаловать, &e{}\n\
+         &7Используйте &a/server <имя> &fили &a/hub &fдля перехода на сервер.\n\
+         &fСписок серверов: &a/serverlist",
+        username
+    ))
+}
+
+// ========================================================================
+// Вспомогательное
+// ========================================================================
+
 fn is_nbt_packet(id: i32) -> bool {
     matches!(id, 0x11 | 0x12 | 0x18 | 0x2D | 0x2E)
 }
 
-async fn fallback_on_backend_disconnect(
-    proxy: &Arc<Proxy>,
-    client: &ClientLink,
-    username: &str,
-) -> bool {
-    if !proxy.fallback.config.enabled {
-        return false;
-    }
-    let old_server = proxy.server_names().first().cloned().unwrap_or_else(|| "unknown".to_string());
-    let fallback_name = &proxy.fallback.config.fallback_server;
-    info!(%username, %old_server, %fallback_name, "FALLBACK: бэкенд упал");
-
-    let msg = proxy.fallback.config.kick_message
-        .replace("{server}", &old_server)
-        .replace("{fallback}", fallback_name);
-    let formatted = format_message(&msg);
-    let mut c = client.lock().await;
-    let _ = c.send(packet_bytes(
-        ids::PLAY_CHAT_MESSAGE_CLIENTBOUND,
-        formatted.as_bytes(),
-    )).await;
-    true
-}
-
 async fn send_hex_chat(client: &ClientLink, text: &str) -> Result<()> {
-    let formatted = messages::format_message(text);
+    let formatted = format_message(text);
     let mut c = client.lock().await;
     c.send(packet_bytes(
-        ids::PLAY_CHAT_MESSAGE_CLIENTBOUND,
+        PLAY_CHAT_MESSAGE_CLIENTBOUND,
         formatted.as_bytes(),
     ))
     .await
@@ -1066,9 +1246,9 @@ async fn send_login_disconnect(
     client: &mut Framed<TcpStream, MinecraftCodec>,
     reason: &str,
 ) -> Result<()> {
-    let json = serde_json::json!({"text": reason, "color": "red"}).to_string();
+    let component = serde_json::json!({"text": convert_to_minecraft(reason), "color": "reset"}).to_string();
     client
-        .send(packet_bytes(ids::LOGIN_DISCONNECT, json.as_bytes()))
+        .send(packet_bytes(LOGIN_DISCONNECT, component.as_bytes()))
         .await?;
     Ok(())
 }
@@ -1090,10 +1270,12 @@ fn parse_proxy_command(pkt: &[u8]) -> Option<String> {
     if id != PLAY_CHAT_MESSAGE {
         return None;
     }
-    let (_, msg) = read_string(body).ok()?;
+    let (_, msg) = read_string(body).map(|(_, s)| s)?;
     if msg.starts_with('/') {
         Some(msg)
     } else {
         None
     }
 }
+
+use std::sync::atomic::Ordering;

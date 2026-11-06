@@ -26,7 +26,7 @@ pub fn format_message(raw: &str) -> String {
 }
 
 /// Перевести &коды в §, а & #RRGGBB в §x§R§G§B.
-fn convert_to_minecraft(raw: &str) -> String {
+pub fn convert_to_minecraft(raw: &str) -> String {
     let mut out = String::with_capacity(raw.len());
     let mut chars = raw.chars().peekable();
     while let Some(ch) = chars.next() {

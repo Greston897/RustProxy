@@ -14,8 +14,6 @@ fallback_server = "lobby"
 bind = "0.0.0.0:25565"
 worker_threads = 0   # 0 = все ядра CPU
 tcp_nodelay = true
-keepalive_interval_secs = 30
-keepalive_timeout_secs = 90
 
 [status]
 motd = "&bRustProxy &7| &e1.16.5 → 26.3"
@@ -38,17 +36,21 @@ address = "127.0.0.1:25568"
 enabled = true
 
 [auth]
-mode = "offline"   # offline | online | microsoft (этап 5)
+mode = "offline"   # offline | online | microsoft
 
-[auth.local]
-enabled = false   # локальная регистрация/логин (этап 9)
-bot_token = "YOUR_BOT_TOKEN"
-admin_chat_id = 0
+[auth_local]
+enabled = true
+cache_ttl_secs = 3600
 
 [captcha]
-enabled = false   # включить проверку на бота
-ttl_secs = 60
+enabled = false
+ttl_secs = 300
 max_attempts = 3
+exemption_hours = 4
+
+[tfa]
+enabled = false
+bot_token = "YOUR_BOT_TOKEN"
 
 [ddos]
 enabled = true
@@ -65,3 +67,7 @@ fallback_server = "lobby"
 auto_return = true
 health_check_interval_secs = 15
 kick_message = "&b&lRustProxy &f» &eСервер &c{server} &eушёл оффлайн. &fПерекидываем на &a{fallback} &bбез дисконнекта."
+
+[monitor]
+enabled = true
+interval_secs = 30

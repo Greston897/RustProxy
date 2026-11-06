@@ -1,5 +1,6 @@
 //! Ядро прокси: реестр серверов, сессии игроков, подключение к бэкендам.
-//! Интеграция: auth (login/reg), TFA (Telegram 2FA), CAPTCHA, Skins, Fallback, DDoS, метрики.
+//! Интеграция: auth (login/reg), TFA (Telegram /link), CAPTCHA, Fallback, DDoS,
+//! метрики, мониторинг ресурсов бэкендов, клики [connect]/[server] в лобби.
 
 use anyhow::{anyhow, bail, Context, Result};
 use std::net::SocketAddr;
@@ -7,7 +8,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::net::TcpStream;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Mutex};
 use tokio::time;
 use tokio_util::codec::Framed;
 use futures_util::sink::SinkExt;
@@ -15,6 +16,7 @@ use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 use crate::auth::AuthManager;
+use crate::backend_monitor::BackendMonitor;
 use crate::captcha::CaptchaManager;
 use crate::config::ProxyConfig;
 use crate::ddos_protection::DDoSManager;
@@ -28,19 +30,18 @@ use crate::protocol::packets::{
 };
 use crate::protocol::varint::{read_varint, read_string};
 use crate::protocol::versions;
-use crate::skin::SkinManager;
 use crate::tfa::TfaManager;
 
 pub struct Proxy {
     pub config: Arc<ProxyConfig>,
     pub auth: AuthManager,
-    pub tfa: TfaManager,
-    pub captcha: CaptchaManager,
-    pub skin: SkinManager,
+    pub tfa: Arc<Mutex<TfaManager>>,
+    pub captcha: Arc<Mutex<CaptchaManager>>,
     pub key_pair: ServerKeyPair,
     pub metrics: Arc<Metrics>,
     pub ddos: Arc<DDoSManager>,
     pub fallback: Arc<FallbackManager>,
+    pub monitor: BackendMonitor,
     pub servers: Arc<dashmap::DashMap<String, Arc<Server>>>,
     pub players: Arc<dashmap::DashMap<Uuid, Arc<PlayerSession>>>,
     pub backend_pool: Arc<
@@ -71,13 +72,9 @@ pub struct PlayerSession {
     pub connected_at: Instant,
     pub client_protocol: i32,
     pub server_protocol: i32,
-    /// Авторизован ли по паролю (etap 12)
     pub authenticated: bool,
-    /// Пройден ли TFA (Telegram 2FA)
     pub tfa_verified: bool,
-    /// Пройдена ли капча
     pub captcha_verified: bool,
-    /// IP с которого вошёл (для кэша и смены IP)
     pub login_ip: Option<std::net::IpAddr>,
 }
 
@@ -107,18 +104,19 @@ impl PlayerSession {
 impl Proxy {
     pub async fn new(config: Arc<ProxyConfig>) -> Result<Self> {
         let auth = AuthManager::new();
-        let tfa = TfaManager::new(config.tfa.bot_token.clone())?;
-        let captcha = CaptchaManager::new()?;
-        let skin = SkinManager::new();
+        let tfa = Arc::new(Mutex::new(TfaManager::new(config.tfa.bot_token.clone())?));
+        let captcha = Arc::new(Mutex::new(CaptchaManager::new()?));
         let key_pair = ServerKeyPair::generate()?;
         info!("RSA ключевая пара сгенерирована (1024 бит)");
         let metrics = Arc::new(Metrics::new());
         let ddos = Arc::new(DDoSManager::new(config.ddos_config()));
         let fallback = Arc::new(FallbackManager::with_config(config.fallback_config()));
+        let monitor = BackendMonitor::new(config.monitor_config().interval_secs);
 
         let servers = Arc::new(dashmap::DashMap::new());
         for s in &config.servers {
             if s.enabled {
+                monitor.register(s.name.clone(), s.address.clone());
                 servers.insert(
                     s.name.clone(),
                     Arc::new(Server {
@@ -139,11 +137,11 @@ impl Proxy {
             auth,
             tfa,
             captcha,
-            skin,
             key_pair,
             metrics,
             ddos,
             fallback,
+            monitor,
             servers,
             players: Arc::new(dashmap::DashMap::new()),
             backend_pool,
@@ -154,9 +152,47 @@ impl Proxy {
     pub async fn run(self: Arc<Self>) -> Result<()> {
         let config = Arc::clone(&self.config);
         let pinger = Arc::clone(&self);
+        let monitor_proxy = Arc::clone(&self);
 
         let listener_task = tokio::spawn(listener::run(config, self.clone()));
         let pinger_task = tokio::spawn(pinger.start_pinger());
+        let monitor_task = tokio::spawn(monitor_proxy.start_monitor());
+        let tfa_task = {
+            let p = Arc::clone(&self);
+            tokio::spawn(async move {
+                let mut interval = time::interval(Duration::from_secs(2));
+                loop {
+                    interval.tick().await;
+                    if p.is_shutting_down() {
+                        return;
+                    }
+                    let updates = match p.tfa.lock().await.poll_updates().await {
+                        Ok(u) => u,
+                        Err(e) => {
+                            warn!("tfa poll error: {e}");
+                            continue;
+                        }
+                    };
+                    for upd in updates {
+                        match p.tfa.lock().await.handle_bot_response(upd.chat_id, &upd.text) {
+                            Ok(Some(uuid)) => {
+                                info!(%uuid, "TFA login confirmed via Telegram (/da)");
+                                if let Some(ps) = p.players.get(&uuid) {
+                                    let mut new_ps = (*ps).clone();
+                                    new_ps.tfa_verified = true;
+                                    new_ps.authenticated = true;
+                                    p.players.insert(uuid, Arc::new(new_ps));
+                                }
+                            }
+                            Ok(None) => {}
+                            Err(e) => {
+                                warn!("tfa bot response: {e}");
+                            }
+                        }
+                    }
+                }
+            })
+        };
 
         tokio::signal::ctrl_c().await.ok();
         info!("Graceful shutdown...");
@@ -164,6 +200,8 @@ impl Proxy {
         self.shutdown.store(true, Ordering::SeqCst);
         listener_task.abort();
         pinger_task.abort();
+        monitor_task.abort();
+        tfa_task.abort();
 
         let player_uuids: Vec<Uuid> = self.players.iter().map(|e| *e.key()).collect();
         for uuid in player_uuids {
@@ -206,6 +244,33 @@ impl Proxy {
                         srv.online.store(false, Ordering::Relaxed);
                     }
                 });
+            }
+        }
+    }
+
+    async fn start_monitor(self: Arc<Self>) {
+        let interval = self.config.monitor_config().interval_secs;
+        let mut ticker = time::interval(Duration::from_secs(interval));
+        loop {
+            ticker.tick().await;
+            if self.is_shutting_down() {
+                return;
+            }
+            // Обновляем метрики мониторинга из текущих снимков серверов
+            for entry in self.servers.iter() {
+                let s = entry.value();
+                let online = s.players.load(Ordering::Relaxed);
+                let max = s.max.load(Ordering::Relaxed);
+                let motd = s.motd.read().await.clone();
+                self.monitor.update_status(
+                    &s.name,
+                    s.online.load(Ordering::Relaxed),
+                    online,
+                    max,
+                    motd,
+                    versions::MAX_PROTOCOL,
+                    0, // ping_ms обновляется отдельно, если нужно
+                );
             }
         }
     }
@@ -271,6 +336,18 @@ impl Proxy {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
+
+        let now = Instant::now();
+        // ping_ms не знаем без замеров, оставим 0 (можно замерять отдельно)
+        self.monitor.update_status(
+            &server.name,
+            true,
+            players_online,
+            players_max,
+            motd,
+            versions::MAX_PROTOCOL,
+            0,
+        );
 
         server.online.store(true, Ordering::Relaxed);
         server.players.store(players_online, Ordering::Relaxed);
@@ -423,6 +500,11 @@ impl Proxy {
             "modinfo": {"type": "FML", "modList": []},
         })
     }
+}
+
+/// Внутренний хелпер для split_address (public внутри crate).
+pub fn split_address_inner(addr: &str) -> (String, String) {
+    split_address(addr)
 }
 
 fn split_address(addr: &str) -> (String, String) {

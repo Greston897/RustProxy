@@ -1,7 +1,7 @@
 use anyhow::Result;
 use clap::Parser;
-use config::ProxyConfig;
-use proxy::Proxy;
+use crate::config::ProxyConfig;
+use crate::proxy::Proxy;
 use std::sync::Arc;
 use tracing::{info, subscriber};
 use tracing_subscriber::{EnvFilter, FmtSubscriber};

@@ -41,7 +41,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 
 # UUID (офлайн UUID = name-based, как в Bungee/Velocity)
-uuid = { version = "1", features = ["v4", "serde"] }
+uuid = { version = "1", features = ["v4", "v5", "serde"] }
 md5 = "0.10"
 
 # Auth (Mojang / Microsoft шаг 2)

@@ -7,14 +7,16 @@
 //! 4. (готово)  ViaVersion перевод пакетов 754↔777
 //! 5. (пропуск) Microsoft/Xbox auth
 //! 6. (готово)  Оптимизация 2к CCU, connection pool, метрики, graceful shutdown
-//! 7. (переработка) Убраны фалш-модули, продакшн-архитектура
-//! 8. (сейчас)  Простой auth: /login /register /l /reg + Telegram 2FA + IP-кэш 1ч
-//! 9. (сейчас)  CAPTCHA: бот-проверка + ховер-капча + 4ч кэш по аккаунту + IP-смена
-//! 10. (сейчас)  Скины (порт SkinsRestorer на Rust)
-//! 11. (сейчас)  Аудит безопасности, утечки памяти, уязвимости
-//! 12. (планируется) Полный функционал BungeeCord / NullCordX
+//! 7. (готово)  Убраны фалш-модули, продакшн-архитектура
+//! 8. (готово)  Простой auth: /login /register /l /reg + IP-кэш 1ч
+//! 9. (готово)  CAPTCHA: бот-проверка + ховер-капча + 4ч кэш по аккаунту + IP-смена
+//! 10. (сейчас) TFA через Telegram /link + подтверждение входа через бота
+//! 11. (готово)  DDoS защита NBT-пакетами
+//! 12. (сейчас)  Этап 15: мониторинг ресурсов бэкендов (NullCordX) + все команды BungeeCord
+//!             + система соединений [connect]/[server] в лобби (Velocity/NullCord стиль)
 
 pub mod auth;
+pub mod backend_monitor;
 pub mod captcha;
 pub mod config;
 pub mod ddos_protection;
@@ -24,5 +26,4 @@ pub mod messages;
 pub mod network;
 pub mod protocol;
 pub mod proxy;
-pub mod skin;
 pub mod tfa;

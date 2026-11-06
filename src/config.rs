@@ -55,12 +55,8 @@ fn default_cache_ttl_secs() -> u64 {
     3600
 }
 
-fn default_skin_enabled() -> bool {
-    true
-}
-
-fn default_tfa_enabled() -> bool {
-    false
+fn default_monitor_interval_secs() -> u64 {
+    30
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -72,9 +68,9 @@ pub struct ProxyConfig {
     pub auth_local: AuthLocalSection,
     pub captcha: CaptchaSection,
     pub tfa: TfaSection,
-    pub skin: SkinSection,
     pub ddos: DDoSSection,
     pub fallback: FallbackSection,
+    pub monitor: MonitorSection,
     #[serde(default)]
     pub servers: Vec<ServerConfig>,
 }
@@ -157,18 +153,10 @@ pub struct CaptchaSection {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct TfaSection {
-    #[serde(default = "default_tfa_enabled")]
+    #[serde(default = "default_true")]
     pub enabled: bool,
     #[serde(default)]
     pub bot_token: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct SkinSection {
-    #[serde(default = "default_skin_enabled")]
-    pub enabled: bool,
-    #[serde(default = "default_mojang_cache_hours")]
-    pub mojang_cache_hours: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -203,6 +191,14 @@ pub struct FallbackSection {
     pub kick_message: String,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct MonitorSection {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_monitor_interval_secs")]
+    pub interval_secs: u64,
+}
+
 fn default_captcha_ttl() -> u64 {
     300
 }
@@ -213,10 +209,6 @@ fn default_captcha_max_attempts() -> usize {
 
 fn default_exemption_hours() -> u64 {
     4
-}
-
-fn default_mojang_cache_hours() -> u64 {
-    24
 }
 
 fn default_nbt_depth() -> usize {
@@ -286,5 +278,33 @@ impl ProxyConfig {
 
     pub fn exemption_secs(&self) -> u64 {
         self.captcha.exemption_hours * 3600
+    }
+
+    pub fn ddos_config(&self) -> crate::ddos_protection::DDoSConfig {
+        crate::ddos_protection::DDoSConfig {
+            enabled: self.ddos.enabled,
+            max_nbt_depth: self.ddos.max_nbt_depth,
+            max_nbt_tag_size: self.ddos.max_nbt_tag_size,
+            max_nbt_list_size: self.ddos.max_nbt_list_size,
+            nbt_packets_per_sec: self.ddos.nbt_packets_per_sec,
+            max_connections_per_sec_per_ip: self.ddos.max_connections_per_sec_per_ip,
+            ban_duration_secs: self.ddos.ban_duration_secs,
+        }
+    }
+
+    pub fn fallback_config(&self) -> crate::fallback::FallbackConfig {
+        crate::fallback::FallbackConfig {
+            fallback_server: self.fallback.fallback_server.clone(),
+            kick_message: self.fallback.kick_message.clone(),
+            auto_return: self.fallback.auto_return,
+            health_check_interval_secs: self.fallback.health_check_interval_secs,
+        }
+    }
+
+    pub fn monitor_config(&self) -> crate::backend_monitor::BackendMonitorConfig {
+        crate::backend_monitor::BackendMonitorConfig {
+            enabled: self.monitor.enabled,
+            interval_secs: self.monitor.interval_secs,
+        }
     }
 }
