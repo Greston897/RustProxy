@@ -2,9 +2,10 @@ name: Build RustProxy
 
 on:
   push:
-    branches: [arena/4528e98d-rustproxy]
+    branches: [arena/4528e98d-rustproxy, arena/656a3782-rustproxy]
   pull_request:
-    branches: [arena/4528e98d-rustproxy]
+    branches: [arena/4528e98d-rustproxy, arena/656a3782-rustproxy]
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
