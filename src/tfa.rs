@@ -129,8 +129,8 @@ impl TfaManager {
             chat_to_player: DashMap::new(),
             bot_token,
             client: Client::builder().timeout(Duration::from_secs(10)).build()?,
-            code_ttl: Duration::from_minutes(10),
-            confirm_ttl: Duration::from_minutes(3),
+            code_ttl: Duration::from_secs(600),
+            confirm_ttl: Duration::from_secs(180),
             offset: 0,
         })
     }

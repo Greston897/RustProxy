@@ -184,7 +184,7 @@ impl CaptchaManager {
             4 => 240,
             _ => 1440,
         };
-        self.ip_bans.insert(ip, Instant::now() + Duration::from_minutes(ban_minutes));
+        self.ip_bans.insert(ip, Instant::now() + Duration::from_secs(ban_minutes as u64 * 60));
     }
 
     /// Очистка просроченных сессий (фоновая задача).
