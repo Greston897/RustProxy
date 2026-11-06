@@ -16,6 +16,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
+// Временная заглушка для отладки — все внешние зависимости убраны
+
 /// Режим аутентификации.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthMode {

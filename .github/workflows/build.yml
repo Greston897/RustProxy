@@ -37,7 +37,7 @@ jobs:
           key: ${{ runner.os }}-cargo-target-v3-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Build release
-        run: cargo build --release 2>&1 | sed 's/\x1b\[[0-9;]*m//g' | grep -E "^error|-->" | head -40 | while IFS= read -r line; do echo "::error::$line"; done; exit 0
+        run: cargo build --release 2>&1 | sed 's/\x1b\[[0-9;]*m//g' | head -100 | while IFS= read -r line; do echo "::notice::$line"; done; exit 0
 
       - name: Show release binary size
         run: ls -lh target/release/rustproxy
