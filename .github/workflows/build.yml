@@ -36,14 +36,8 @@ jobs:
           path: target
           key: ${{ runner.os }}-cargo-target-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Format code
-        run: cargo fmt
-
       - name: Run clippy
         run: cargo clippy --all-targets -- -D warnings
-
-      - name: Build debug
-        run: cargo build
 
       - name: Build release
         run: cargo build --release
