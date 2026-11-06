@@ -16,6 +16,21 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
+/// Профиль игрока (Mojang-стиль).
+#[derive(Debug, Clone)]
+pub struct PlayerProfile {
+    pub uuid: Uuid,
+    pub username: String,
+    pub properties: Vec<String>,
+}
+
+/// Сессия игрока.
+#[derive(Debug, Clone)]
+pub struct Session {
+    pub profile: PlayerProfile,
+    pub access_token: Option<String>,
+}
+
 /// Данные аккаунта игрока.
 #[derive(Debug, Clone)]
 pub struct Account {
